@@ -18,10 +18,10 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore SelfUpdate.slnx
+        run: dotnet restore SelfUpdater.slnx
 
       - name: Build
-        run: dotnet build SelfUpdate.slnx -c Release --no-restore
+        run: dotnet build SelfUpdater.slnx -c Release --no-restore
 
       - name: Test
-        run: dotnet test SelfUpdate.slnx -c Release --no-build --verbosity normal
+        run: dotnet test SelfUpdater.slnx -c Release --no-build --verbosity normal

@@ -1,7 +1,7 @@
 using System.Reflection;
 using System.Security.Cryptography;
 
-namespace SelfUpdate;
+namespace SelfUpdater;
 
 internal static class Utilities
 {

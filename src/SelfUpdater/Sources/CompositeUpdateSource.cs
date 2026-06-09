@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
 
-namespace SelfUpdate.Sources;
+namespace SelfUpdater.Sources;
 
 /// <summary>
 /// Combines several <see cref="IUpdateSource"/> backends into one. Every reachable

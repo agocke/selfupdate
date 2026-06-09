@@ -2,7 +2,7 @@ using System.Net.Http.Headers;
 using Serde;
 using Serde.Json;
 
-namespace SelfUpdate.Sources;
+namespace SelfUpdater.Sources;
 
 /// <summary>
 /// Update source backed by the GitHub Releases API. Discovers the newest release
@@ -53,7 +53,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
         _assetMatches = assetMatches ?? DefaultAssetMatches;
         _http = http ?? new HttpClient();
         if (!_http.DefaultRequestHeaders.UserAgent.Any())
-            _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("selfupdate", "1.0"));
+            _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("selfupdater", "1.0"));
     }
 
     private static bool DefaultAssetMatches(string assetName, string rid) =>

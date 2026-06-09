@@ -26,11 +26,11 @@ jobs:
       - name: Resolve version and tag
         id: version
         run: |
-          # The package version is checked in (src/SelfUpdate/SelfUpdate.csproj), so
+          # The package version is checked in (src/SelfUpdater/SelfUpdater.csproj), so
           # the build is deterministic. The tag is only a release pointer.
-          VERSION="$(grep -oPm1 '(?<=<Version>)[^<]+' src/SelfUpdate/SelfUpdate.csproj)"
+          VERSION="$(grep -oPm1 '(?<=<Version>)[^<]+' src/SelfUpdater/SelfUpdater.csproj)"
           if [ -z "$VERSION" ]; then
-            echo "Could not read <Version> from src/SelfUpdate/SelfUpdate.csproj." >&2
+            echo "Could not read <Version> from src/SelfUpdater/SelfUpdater.csproj." >&2
             exit 1
           fi
           TAG="v$VERSION"
@@ -40,7 +40,7 @@ jobs:
             # tag in-run. A tag pushed with GITHUB_TOKEN does NOT retrigger this
             # workflow, so the current run proceeds straight to publishing (no double run).
             if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-              echo "Tag '$TAG' already exists - bump <Version> in SelfUpdate.csproj before releasing." >&2
+              echo "Tag '$TAG' already exists - bump <Version> in SelfUpdater.csproj before releasing." >&2
               exit 1
             fi
             git config user.name "github-actions[bot]"
@@ -51,7 +51,7 @@ jobs:
             # Tag-triggered: the pushed tag must match the checked-in version.
             if [ "$GITHUB_REF_NAME" != "$TAG" ]; then
               echo "Tag '$GITHUB_REF_NAME' does not match the checked-in version '$TAG'." >&2
-              echo "Bump <Version> in SelfUpdate.csproj (or push the matching tag) and try again." >&2
+              echo "Bump <Version> in SelfUpdater.csproj (or push the matching tag) and try again." >&2
               exit 1
             fi
           fi
@@ -61,19 +61,19 @@ jobs:
           echo "Publishing $TAG"
 
       - name: Restore
-        run: dotnet restore SelfUpdate.slnx
+        run: dotnet restore SelfUpdater.slnx
 
       - name: Build
         run: >-
-          dotnet build SelfUpdate.slnx -c Release --no-restore
+          dotnet build SelfUpdater.slnx -c Release --no-restore
           -p:ContinuousIntegrationBuild=true
 
       - name: Test
-        run: dotnet test SelfUpdate.slnx -c Release --no-build --verbosity normal
+        run: dotnet test SelfUpdater.slnx -c Release --no-build --verbosity normal
 
       - name: Pack
         run: >-
-          dotnet pack src/SelfUpdate/SelfUpdate.csproj -c Release --no-build
+          dotnet pack src/SelfUpdater/SelfUpdater.csproj -c Release --no-build
           -o ${{ github.workspace }}/artifacts
 
       - name: NuGet login (Trusted Publishing)

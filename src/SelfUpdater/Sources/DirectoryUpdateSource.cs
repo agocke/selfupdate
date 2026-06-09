@@ -1,6 +1,6 @@
 using Serde.Json;
 
-namespace SelfUpdate.Sources;
+namespace SelfUpdater.Sources;
 
 /// <summary>
 /// Update source backed by a local directory or network share containing a

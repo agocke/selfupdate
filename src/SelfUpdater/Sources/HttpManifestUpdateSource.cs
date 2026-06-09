@@ -1,6 +1,6 @@
 using Serde.Json;
 
-namespace SelfUpdate.Sources;
+namespace SelfUpdater.Sources;
 
 /// <summary>
 /// Update source backed by a JSON manifest you publish yourself (see
