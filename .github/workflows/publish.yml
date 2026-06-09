@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch: {}   # "start release": tags the checked-in version, then publishes
 
 permissions:
   contents: write   # to create the GitHub Release for the tag
@@ -22,24 +23,42 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Resolve checked-in version
+      - name: Resolve version and tag
         id: version
         run: |
-          # The package version is checked in (src/SelfUpdate/SelfUpdate.csproj),
-          # so the build is deterministic. The tag is only a release trigger and
-          # must match the checked-in version.
+          # The package version is checked in (src/SelfUpdate/SelfUpdate.csproj), so
+          # the build is deterministic. The tag is only a release pointer.
           VERSION="$(grep -oPm1 '(?<=<Version>)[^<]+' src/SelfUpdate/SelfUpdate.csproj)"
           if [ -z "$VERSION" ]; then
             echo "Could not read <Version> from src/SelfUpdate/SelfUpdate.csproj." >&2
             exit 1
           fi
-          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
-            echo "Tag '$GITHUB_REF_NAME' does not match the checked-in version 'v$VERSION'." >&2
-            echo "Bump <Version> in SelfUpdate.csproj (or push the matching tag) and try again." >&2
-            exit 1
+          TAG="v$VERSION"
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # Manual start: refuse to re-release an existing version, then create the
+            # tag in-run. A tag pushed with GITHUB_TOKEN does NOT retrigger this
+            # workflow, so the current run proceeds straight to publishing (no double run).
+            if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+              echo "Tag '$TAG' already exists - bump <Version> in SelfUpdate.csproj before releasing." >&2
+              exit 1
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "$TAG"
+            git push origin "$TAG"
+          else
+            # Tag-triggered: the pushed tag must match the checked-in version.
+            if [ "$GITHUB_REF_NAME" != "$TAG" ]; then
+              echo "Tag '$GITHUB_REF_NAME' does not match the checked-in version '$TAG'." >&2
+              echo "Bump <Version> in SelfUpdate.csproj (or push the matching tag) and try again." >&2
+              exit 1
+            fi
           fi
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing checked-in version $VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Publishing $TAG"
 
       - name: Restore
         run: dotnet restore SelfUpdate.slnx
@@ -73,9 +92,7 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: >-
-          gh release create "$GITHUB_REF_NAME"
-          --title "$GITHUB_REF_NAME"
-          --generate-notes
-          ${{ github.workspace }}/artifacts/*.nupkg
-          || gh release upload "$GITHUB_REF_NAME" ${{ github.workspace }}/artifacts/*.nupkg --clobber
+          gh release view "$TAG" >/dev/null 2>&1
+          || gh release create "$TAG" --title "$TAG" --generate-notes
