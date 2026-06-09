@@ -1,0 +1,81 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # to create the GitHub Release for the tag
+  id-token: write   # to obtain the OIDC token for NuGet Trusted Publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so SourceLink can resolve the commit
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Resolve checked-in version
+        id: version
+        run: |
+          # The package version is checked in (src/SelfUpdate/SelfUpdate.csproj),
+          # so the build is deterministic. The tag is only a release trigger and
+          # must match the checked-in version.
+          VERSION="$(grep -oPm1 '(?<=<Version>)[^<]+' src/SelfUpdate/SelfUpdate.csproj)"
+          if [ -z "$VERSION" ]; then
+            echo "Could not read <Version> from src/SelfUpdate/SelfUpdate.csproj." >&2
+            exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "Tag '$GITHUB_REF_NAME' does not match the checked-in version 'v$VERSION'." >&2
+            echo "Bump <Version> in SelfUpdate.csproj (or push the matching tag) and try again." >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing checked-in version $VERSION"
+
+      - name: Restore
+        run: dotnet restore SelfUpdate.slnx
+
+      - name: Build
+        run: >-
+          dotnet build SelfUpdate.slnx -c Release --no-restore
+          -p:ContinuousIntegrationBuild=true
+
+      - name: Test
+        run: dotnet test SelfUpdate.slnx -c Release --no-build --verbosity normal
+
+      - name: Pack
+        run: >-
+          dotnet pack src/SelfUpdate/SelfUpdate.csproj -c Release --no-build
+          -o ${{ github.workspace }}/artifacts
+
+      - name: NuGet login (Trusted Publishing)
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: agocke
+
+      - name: Push to NuGet.org
+        run: >-
+          dotnet nuget push "${{ github.workspace }}/artifacts/*.nupkg"
+          --source https://api.nuget.org/v3/index.json
+          --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}"
+          --skip-duplicate
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          --title "$GITHUB_REF_NAME"
+          --generate-notes
+          ${{ github.workspace }}/artifacts/*.nupkg
+          || gh release upload "$GITHUB_REF_NAME" ${{ github.workspace }}/artifacts/*.nupkg --clobber

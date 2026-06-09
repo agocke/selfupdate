@@ -20,12 +20,21 @@
     <PackageTags>self-update;updater;single-file;aot;auto-update</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/agocke/selfupdate</PackageProjectUrl>
     <RepositoryUrl>https://github.com/agocke/selfupdate</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
+
+    <!-- Build provenance + debugging: SourceLink, deterministic, embedded untracked
+         sources, and a snupkg symbol package. ContinuousIntegrationBuild is set by CI. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="serde" Version="0.12.0" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
