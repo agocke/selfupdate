@@ -78,8 +78,8 @@ if (args is [Updater.HandoffVerb, ..])
 ### Private GitHub repos
 
 The library is auth-mechanism agnostic — `authToken` is a
-`Func<CancellationToken, ValueTask<string?>>` awaited per request, so a consumer
-can fetch/cache/refresh short-lived or rotating tokens however it likes:
+`Func<CancellationToken, Task<string?>>` awaited per request, so a consumer can
+fetch/cache/refresh short-lived or rotating tokens however it likes:
 
 ```csharp
 var gh = new GitHubReleaseUpdateSource(

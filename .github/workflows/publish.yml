@@ -1,4 +1,4 @@
-name: Release
+name: Publish
 
 on:
   push:
@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write   # to create the GitHub Release for the tag
+  id-token: write   # to obtain the OIDC token for NuGet Trusted Publishing
 
 jobs:
   publish:
@@ -21,16 +22,24 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Derive version from tag
+      - name: Resolve checked-in version
         id: version
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Tag '$GITHUB_REF_NAME' is not a valid SemVer (expected vMAJOR.MINOR.PATCH[-pre])." >&2
+          # The package version is checked in (src/SelfUpdate/SelfUpdate.csproj),
+          # so the build is deterministic. The tag is only a release trigger and
+          # must match the checked-in version.
+          VERSION="$(grep -oPm1 '(?<=<Version>)[^<]+' src/SelfUpdate/SelfUpdate.csproj)"
+          if [ -z "$VERSION" ]; then
+            echo "Could not read <Version> from src/SelfUpdate/SelfUpdate.csproj." >&2
+            exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "Tag '$GITHUB_REF_NAME' does not match the checked-in version 'v$VERSION'." >&2
+            echo "Bump <Version> in SelfUpdate.csproj (or push the matching tag) and try again." >&2
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing version $VERSION"
+          echo "Publishing checked-in version $VERSION"
 
       - name: Restore
         run: dotnet restore SelfUpdate.slnx
@@ -38,7 +47,6 @@ jobs:
       - name: Build
         run: >-
           dotnet build SelfUpdate.slnx -c Release --no-restore
-          -p:Version=${{ steps.version.outputs.version }}
           -p:ContinuousIntegrationBuild=true
 
       - name: Test
@@ -47,16 +55,19 @@ jobs:
       - name: Pack
         run: >-
           dotnet pack src/SelfUpdate/SelfUpdate.csproj -c Release --no-build
-          -p:Version=${{ steps.version.outputs.version }}
           -o ${{ github.workspace }}/artifacts
 
+      - name: NuGet login (Trusted Publishing)
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: agocke
+
       - name: Push to NuGet.org
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: >-
           dotnet nuget push "${{ github.workspace }}/artifacts/*.nupkg"
           --source https://api.nuget.org/v3/index.json
-          --api-key "$NUGET_API_KEY"
+          --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}"
           --skip-duplicate
 
       - name: Create GitHub Release

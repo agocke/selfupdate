@@ -260,7 +260,7 @@ public class SelfUpdateTests
             seenAccept = req.Headers.Accept.ToString();
         });
         var source = new GitHubReleaseUpdateSource(
-            "agocke", "app", authToken: _ => ValueTask.FromResult<string?>("tok-123"), http: new HttpClient(handler));
+            "agocke", "app", authToken: _ => Task.FromResult<string?>("tok-123"), http: new HttpClient(handler));
 
         var release = await source.GetLatestReleaseAsync("osx-arm64");
 

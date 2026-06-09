@@ -23,7 +23,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
 
     private readonly string _owner;
     private readonly string _repo;
-    private readonly Func<CancellationToken, ValueTask<string?>>? _authToken;
+    private readonly Func<CancellationToken, Task<string?>>? _authToken;
     private readonly Func<string, string, bool> _assetMatches;
     private readonly HttpClient _http;
 
@@ -43,7 +43,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
     public GitHubReleaseUpdateSource(
         string owner,
         string repo,
-        Func<CancellationToken, ValueTask<string?>>? authToken = null,
+        Func<CancellationToken, Task<string?>>? authToken = null,
         Func<string, string, bool>? assetMatches = null,
         HttpClient? http = null)
     {
@@ -125,7 +125,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
         return await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
     }
 
-    private async ValueTask AddAuthAsync(HttpRequestMessage req, CancellationToken ct)
+    private async Task AddAuthAsync(HttpRequestMessage req, CancellationToken ct)
     {
         if (_authToken is null)
             return;
