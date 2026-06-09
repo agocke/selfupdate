@@ -1,6 +1,6 @@
 using Serde;
 
-namespace SelfUpdate.Sources;
+namespace SelfUpdater.Sources;
 
 /// <summary>
 /// The JSON manifest shape shared by <see cref="HttpManifestUpdateSource"/> and

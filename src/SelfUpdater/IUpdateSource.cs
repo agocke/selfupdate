@@ -1,4 +1,4 @@
-namespace SelfUpdate;
+namespace SelfUpdater;
 
 /// <summary>
 /// A downloadable build artifact for a specific runtime identifier.

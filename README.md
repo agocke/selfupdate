@@ -1,4 +1,4 @@
-# SelfUpdate
+# SelfUpdater
 
 A small, pluggable self-update engine for single-file / Native AOT .NET apps.
 
@@ -11,7 +11,7 @@ itself — including on Windows, where a running image can't overwrite itself.
 ## Install
 
 ```
-dotnet add package SelfUpdate
+dotnet add package SelfUpdater
 ```
 
 Targets `net8.0`, trim/AOT-compatible, serializes with [Serde.NET](https://github.com/serde-dotnet/serde).
@@ -42,8 +42,8 @@ Implementing your own (S3, a package feed, a torrent, ...) is just those two met
 ## Usage
 
 ```csharp
-using SelfUpdate;
-using SelfUpdate.Sources;
+using SelfUpdater;
+using SelfUpdater.Sources;
 
 var source = new HttpManifestUpdateSource(new Uri("https://example.com/releases.json"));
 

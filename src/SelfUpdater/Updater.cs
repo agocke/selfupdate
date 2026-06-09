@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-namespace SelfUpdate;
+namespace SelfUpdater;
 
 /// <summary>Result of comparing the running build against a source's latest release.</summary>
 public sealed record UpdateCheck(bool UpdateAvailable, SemVer Current, SemVer? Latest, UpdateAsset? Asset);
@@ -142,7 +142,7 @@ public sealed class Updater
 
     private async Task<string?> DownloadAndValidateAsync(UpdateAsset asset, string target, CancellationToken ct)
     {
-        var tempDir = Path.Combine(Path.GetTempPath(), "selfupdate-" + Path.GetRandomFileName());
+        var tempDir = Path.Combine(Path.GetTempPath(), "selfupdater-" + Path.GetRandomFileName());
         Directory.CreateDirectory(tempDir);
         // Name the staged file after the target so the swapped-in binary keeps its name.
         var staged = Path.Combine(tempDir, Path.GetFileName(target));

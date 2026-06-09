@@ -1,12 +1,12 @@
 using System.Net;
 using System.Text;
 
-using SelfUpdate;
-using SelfUpdate.Sources;
+using SelfUpdater;
+using SelfUpdater.Sources;
 
-namespace SelfUpdate.Tests;
+namespace SelfUpdater.Tests;
 
-public class SelfUpdateTests
+public class SelfUpdaterTests
 {
     [Theory]
     [InlineData("1.2.3", 1, 2, 3, null)]
@@ -121,7 +121,7 @@ public class SelfUpdateTests
     [Fact]
     public async Task DirectorySource_ReadsManifestAndOpensAsset()
     {
-        var dir = Directory.CreateTempSubdirectory("selfupdate-test-").FullName;
+        var dir = Directory.CreateTempSubdirectory("selfupdater-test-").FullName;
         try
         {
             File.WriteAllText(Path.Combine(dir, "app-osx-arm64"), "the-binary-bytes");
@@ -149,7 +149,7 @@ public class SelfUpdateTests
     [Fact]
     public async Task DirectorySource_MissingManifestReturnsNull()
     {
-        var dir = Directory.CreateTempSubdirectory("selfupdate-test-").FullName;
+        var dir = Directory.CreateTempSubdirectory("selfupdater-test-").FullName;
         try
         {
             var source = new DirectoryUpdateSource(dir);

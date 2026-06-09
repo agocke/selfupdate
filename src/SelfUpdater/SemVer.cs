@@ -1,4 +1,4 @@
-namespace SelfUpdate;
+namespace SelfUpdater;
 
 /// <summary>
 /// A small semantic-version implementation: <c>major.minor.patch</c> with an
