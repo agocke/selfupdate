@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: {}   # "start release": tags the checked-in version, then publishes
+  workflow_dispatch: {}   # "start release": publishes the checked-in version, then tags it on success
 
 permissions:
   contents: write   # to create the GitHub Release for the tag
@@ -23,11 +23,13 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Resolve version and tag
+      - name: Resolve version
         id: version
         run: |
           # The package version is checked in (src/SelfUpdater/SelfUpdater.csproj), so
-          # the build is deterministic. The tag is only a release pointer.
+          # the build is deterministic. The tag is only a release pointer, and it is
+          # created/pushed AFTER a successful publish (see the "Tag release" step) so a
+          # failed run never leaves a dangling tag that blocks retries.
           VERSION="$(grep -oPm1 '(?<=<Version>)[^<]+' src/SelfUpdater/SelfUpdater.csproj)"
           if [ -z "$VERSION" ]; then
             echo "Could not read <Version> from src/SelfUpdater/SelfUpdater.csproj." >&2
@@ -36,17 +38,13 @@ jobs:
           TAG="v$VERSION"
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            # Manual start: refuse to re-release an existing version, then create the
-            # tag in-run. A tag pushed with GITHUB_TOKEN does NOT retrigger this
-            # workflow, so the current run proceeds straight to publishing (no double run).
+            # Manual start: refuse to re-release a version that's already been tagged
+            # (the tag is written only on a successful publish, so an existing tag means
+            # this version was already published).
             if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
               echo "Tag '$TAG' already exists - bump <Version> in SelfUpdater.csproj before releasing." >&2
               exit 1
             fi
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag "$TAG"
-            git push origin "$TAG"
           else
             # Tag-triggered: the pushed tag must match the checked-in version.
             if [ "$GITHUB_REF_NAME" != "$TAG" ]; then
@@ -88,6 +86,19 @@ jobs:
           --source https://api.nuget.org/v3/index.json
           --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}"
           --skip-duplicate
+
+      - name: Tag release
+        # Only on manual start: the package is now published, so record the release
+        # marker. A tag pushed with GITHUB_TOKEN does NOT retrigger this workflow, so
+        # there is no double run. (On a tag-triggered run the tag already exists.)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
 
       - name: Create GitHub Release
         env:
