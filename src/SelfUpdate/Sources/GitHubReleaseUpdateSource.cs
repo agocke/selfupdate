@@ -23,7 +23,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
 
     private readonly string _owner;
     private readonly string _repo;
-    private readonly Func<string?>? _authToken;
+    private readonly Func<CancellationToken, ValueTask<string?>>? _authToken;
     private readonly Func<string, string, bool> _assetMatches;
     private readonly HttpClient _http;
 
@@ -31,8 +31,9 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
     /// <param name="repo">Repository name.</param>
     /// <param name="authToken">
     /// Optional callback returning a bearer token for the GitHub API. Required for
-    /// private repositories; omit for public ones. Called once per request so
-    /// rotating/short-lived tokens are picked up automatically.
+    /// private repositories; omit for public ones. Awaited once per request so a
+    /// consumer can fetch/cache/refresh rotating, short-lived tokens (e.g. a vended
+    /// GitHub App installation token) however it likes.
     /// </param>
     /// <param name="assetMatches">
     /// Predicate <c>(assetName, rid) =&gt; bool</c> selecting the asset for a RID.
@@ -42,7 +43,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
     public GitHubReleaseUpdateSource(
         string owner,
         string repo,
-        Func<string?>? authToken = null,
+        Func<CancellationToken, ValueTask<string?>>? authToken = null,
         Func<string, string, bool>? assetMatches = null,
         HttpClient? http = null)
     {
@@ -66,7 +67,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         req.Headers.Add("X-GitHub-Api-Version", ApiVersion);
-        AddAuth(req);
+        await AddAuthAsync(req, ct).ConfigureAwait(false);
 
         string json;
         try
@@ -117,16 +118,18 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
         // HttpClient drops the Authorization header on the cross-host redirect, so
         // sending it here is safe for both public and private downloads.
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/octet-stream"));
-        AddAuth(req);
+        await AddAuthAsync(req, ct).ConfigureAwait(false);
 
         var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
         return await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
     }
 
-    private void AddAuth(HttpRequestMessage req)
+    private async ValueTask AddAuthAsync(HttpRequestMessage req, CancellationToken ct)
     {
-        if (_authToken?.Invoke() is { Length: > 0 } token)
+        if (_authToken is null)
+            return;
+        if (await _authToken(ct).ConfigureAwait(false) is { Length: > 0 } token)
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
     }
 }

@@ -77,13 +77,14 @@ if (args is [Updater.HandoffVerb, ..])
 
 ### Private GitHub repos
 
-The library is auth-mechanism agnostic — `authToken` is a `Func<string?>` called
-per request, so short-lived/rotating tokens just work:
+The library is auth-mechanism agnostic — `authToken` is a
+`Func<CancellationToken, ValueTask<string?>>` awaited per request, so a consumer
+can fetch/cache/refresh short-lived or rotating tokens however it likes:
 
 ```csharp
 var gh = new GitHubReleaseUpdateSource(
     owner: "you", repo: "private-app",
-    authToken: () => TokenCache.GetCurrentInstallationToken()); // your concern
+    authToken: ct => TokenCache.GetCurrentInstallationTokenAsync(ct)); // your concern
 ```
 
 Use a fine-grained PAT (`Contents: read-only`), a GitHub App installation token
