@@ -19,7 +19,7 @@ public sealed class HttpManifestUpdateSource : IUpdateSource
         _http = http ?? new HttpClient();
     }
 
-    public async Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(string rid, CancellationToken ct = default)
+    public async Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(CancellationToken ct = default)
     {
         string json;
         try
@@ -41,9 +41,7 @@ public sealed class HttpManifestUpdateSource : IUpdateSource
             return [];
         }
 
-        var release = ManifestMapping.ToRelease(manifest, rid,
-            url => new Uri(_manifestUrl, url).ToString());
-        return release is null ? [] : [release];
+        return ManifestMapping.ToReleases(manifest, url => new Uri(_manifestUrl, url).ToString());
     }
 
     public Task<Stream> OpenAssetAsync(UpdateAsset asset, CancellationToken ct = default) =>

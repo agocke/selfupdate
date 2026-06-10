@@ -25,17 +25,17 @@ public sealed class CompositeUpdateSource : IUpdateSource
         _sources = sources;
     }
 
-    public async Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(string rid, CancellationToken ct = default)
+    public async Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(CancellationToken ct = default)
     {
         var perSource = await Task.WhenAll(
-            _sources.Select(s => SafeGetAsync(s, rid, ct))).ConfigureAwait(false);
+            _sources.Select(s => SafeGetAsync(s, ct))).ConfigureAwait(false);
 
         var merged = new List<UpdateRelease>();
         for (var i = 0; i < perSource.Length; i++)
         {
             foreach (var release in perSource[i])
             {
-                if (release.Asset is { } asset)
+                foreach (var asset in release.Assets)
                     _assetOwners.AddOrUpdate(asset, _sources[i]);
                 merged.Add(release);
             }
@@ -70,11 +70,11 @@ public sealed class CompositeUpdateSource : IUpdateSource
     }
 
     private static async Task<IReadOnlyList<UpdateRelease>> SafeGetAsync(
-        IUpdateSource source, string rid, CancellationToken ct)
+        IUpdateSource source, CancellationToken ct)
     {
         try
         {
-            return await source.GetReleasesAsync(rid, ct).ConfigureAwait(false);
+            return await source.GetReleasesAsync(ct).ConfigureAwait(false);
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {

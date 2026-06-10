@@ -20,7 +20,7 @@ public sealed class DirectoryUpdateSource : IUpdateSource
         _manifestFileName = manifestFileName;
     }
 
-    public async Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(string rid, CancellationToken ct = default)
+    public async Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(CancellationToken ct = default)
     {
         var manifestPath = Path.Combine(_directory, _manifestFileName);
         if (!File.Exists(manifestPath))
@@ -37,8 +37,7 @@ public sealed class DirectoryUpdateSource : IUpdateSource
             return [];
         }
 
-        var release = ManifestMapping.ToRelease(manifest, rid, ResolvePath);
-        return release is null ? [] : [release];
+        return ManifestMapping.ToReleases(manifest, ResolvePath);
     }
 
     public Task<Stream> OpenAssetAsync(UpdateAsset asset, CancellationToken ct = default) =>

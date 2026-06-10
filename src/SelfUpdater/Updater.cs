@@ -1,10 +1,9 @@
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 
 namespace SelfUpdater;
 
 /// <summary>Result of comparing the running build against a source's releases.</summary>
-public sealed record UpdateCheck(bool UpdateAvailable, SemVer Current, SemVer? Latest, UpdateAsset? Asset);
+public sealed record UpdateCheck(bool UpdateAvailable, SemVer Current, UpdateRelease? Latest);
 
 public enum UpdateOutcome
 {
@@ -24,14 +23,17 @@ public sealed record UpdateResult(UpdateOutcome Outcome, SemVer? Version = null,
 
 public sealed class UpdaterOptions
 {
-    /// <summary>Runtime identifier to request from the source (defaults to the running RID).</summary>
-    public string Rid { get; init; } = RuntimeInformation.RuntimeIdentifier;
-
     /// <summary>Path of the binary to replace. Defaults to the running executable.</summary>
     public string? TargetPath { get; init; }
 
-    /// <summary>Arguments used to smoke-test a freshly downloaded binary; must exit 0.</summary>
-    public IReadOnlyList<string> ValidateArgs { get; init; } = ["--help"];
+    /// <summary>
+    /// Arguments used to smoke-test a freshly downloaded binary, which must exit 0.
+    /// Validation is <b>opt-in</b>: when <c>null</c> or empty (the default) the
+    /// downloaded binary is not executed before being staged. Set this only if your
+    /// binary supports the given arguments and exits 0 on success (e.g.
+    /// <c>["--version"]</c>) — there is no universally safe probe to assume.
+    /// </summary>
+    public IReadOnlyList<string>? ValidateArgs { get; init; }
 
     /// <summary>When true, the handed-off process relaunches the app after swapping.</summary>
     public bool Relaunch { get; init; }
@@ -50,12 +52,13 @@ public sealed class UpdaterOptions
 /// Windows).
 /// <para>
 /// The engine is deliberately <b>policy-free</b>: it neither knows nor fetches the
-/// caller's current version, and it never decides what counts as "new". The caller
-/// owns its version and the comparison. Use <see cref="GetReleasesAsync"/> +
-/// <see cref="ApplyAsync(UpdateRelease, CancellationToken)"/> for full control, or
-/// the <see cref="UpdateAsync(SemVer, CancellationToken)"/> / <see cref="CheckAsync(SemVer, CancellationToken)"/>
-/// convenience overloads (which take the caller's current version and apply the
-/// common "newest wins" policy) for the simple case.
+/// caller's current version, never decides what counts as "new", and never picks
+/// which asset suits the running platform. The caller owns its version, the version
+/// comparison, and asset selection. Use <see cref="GetReleasesAsync"/> +
+/// <see cref="ApplyAsync(UpdateAsset, CancellationToken)"/> for full control, or the
+/// <see cref="UpdateAsync"/> / <see cref="CheckAsync"/> convenience overloads (which
+/// take the caller's current version plus an asset selector and apply the common
+/// "newest wins" policy) for the simple case.
 /// </para>
 /// </summary>
 public sealed class Updater
@@ -80,102 +83,118 @@ public sealed class Updater
     }
 
     /// <summary>
-    /// List the releases the source offers for this RID. The caller compares them
-    /// against its own current version to decide whether any are new; this method
-    /// applies no policy of its own.
+    /// List the releases the source offers. The caller compares them against its own
+    /// current version to decide whether any are new, and selects the asset matching
+    /// its platform; this method applies no policy of its own.
     /// </summary>
     public Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(CancellationToken ct = default) =>
-        _source.GetReleasesAsync(_options.Rid, ct);
+        _source.GetReleasesAsync(ct);
 
     /// <summary>
-    /// Download, validate, and stage a release the caller has chosen, then hand off
-    /// to the new binary. Performs <b>no</b> version comparison — it applies exactly
-    /// the release it is given. The caller is responsible for having decided this
-    /// release is newer than what it is running.
+    /// Download, validate, and stage a specific asset the caller has chosen, then
+    /// hand off to the new binary. Performs <b>no</b> version comparison or asset
+    /// selection — it applies exactly the asset it is given. The caller is
+    /// responsible for having decided this asset is the right, newer build.
     /// </summary>
-    public async Task<UpdateResult> ApplyAsync(UpdateRelease release, CancellationToken ct = default)
-    {
-        if (release.Asset is null)
-        {
-            _log.WriteLine($"No asset for rid '{_options.Rid}' in release {release.Version}.");
-            return new UpdateResult(UpdateOutcome.NoAssetForPlatform, release.Version,
-                $"No artifact for {_options.Rid}.");
-        }
+    public Task<UpdateResult> ApplyAsync(UpdateAsset asset, CancellationToken ct = default) =>
+        ApplyAssetAsync(asset, version: null, ct);
 
+    private async Task<UpdateResult> ApplyAssetAsync(UpdateAsset asset, SemVer? version, CancellationToken ct)
+    {
         if (!_options.AllowNonSingleFile && !Utilities.IsSingleFile())
         {
             _log.WriteLine("Cannot self-update: not deployed as a single file (e.g. running via 'dotnet run').");
-            return new UpdateResult(UpdateOutcome.NotSelfContained, release.Version);
+            return new UpdateResult(UpdateOutcome.NotSelfContained, version);
         }
 
         var target = _options.TargetPath ?? Utilities.ProcessPath;
         if (string.IsNullOrEmpty(target))
         {
             _log.WriteLine("Cannot self-update: unable to determine the target executable path.");
-            return new UpdateResult(UpdateOutcome.Failed, release.Version, "Unknown target path.");
+            return new UpdateResult(UpdateOutcome.Failed, version, "Unknown target path.");
         }
 
-        var staged = await DownloadAndValidateAsync(release.Asset, target, ct).ConfigureAwait(false);
+        var staged = await DownloadAndValidateAsync(asset, target, ct).ConfigureAwait(false);
         if (staged is null)
-            return new UpdateResult(UpdateOutcome.Failed, release.Version, "Download or validation failed.");
+            return new UpdateResult(UpdateOutcome.Failed, version, "Download or validation failed.");
 
         if (!LaunchHandoff(staged, target))
-            return new UpdateResult(UpdateOutcome.Failed, release.Version, "Could not launch the handoff process.");
+            return new UpdateResult(UpdateOutcome.Failed, version, "Could not launch the handoff process.");
 
-        return new UpdateResult(UpdateOutcome.Staged, release.Version);
+        return new UpdateResult(UpdateOutcome.Staged, version);
     }
 
     /// <summary>
-    /// Convenience over <see cref="GetReleasesAsync"/>: report whether any release
-    /// is newer than <paramref name="currentVersion"/>, returning the newest one.
+    /// Convenience over <see cref="GetReleasesAsync"/>: report whether any release is
+    /// newer than <paramref name="currentVersion"/>, returning the newest one.
+    /// Pass <paramref name="releaseFilter"/> to restrict the candidates (e.g.
+    /// <c>r =&gt; !r.IsPrerelease</c> to ignore prereleases).
     /// </summary>
-    public async Task<UpdateCheck> CheckAsync(SemVer currentVersion, CancellationToken ct = default)
+    public async Task<UpdateCheck> CheckAsync(
+        SemVer currentVersion,
+        Func<UpdateRelease, bool>? releaseFilter = null,
+        CancellationToken ct = default)
     {
-        _log.WriteLine($"Checking for updates (current {currentVersion}, rid {_options.Rid})...");
+        _log.WriteLine($"Checking for updates (current {currentVersion})...");
         var releases = await GetReleasesAsync(ct).ConfigureAwait(false);
-        var newest = Newest(releases);
+        var newest = Newest(releases, releaseFilter);
         if (newest is null)
         {
             _log.WriteLine("Update source returned no release information.");
-            return new UpdateCheck(false, currentVersion, null, null);
+            return new UpdateCheck(false, currentVersion, null);
         }
 
         var available = newest.Version > currentVersion;
         _log.WriteLine(available ? $"Update available: {newest.Version}" : $"Up to date (latest {newest.Version}).");
-        return new UpdateCheck(available, currentVersion, newest.Version, newest.Asset);
+        return new UpdateCheck(available, currentVersion, newest);
     }
 
     /// <summary>
-    /// Convenience over <see cref="GetReleasesAsync"/> + <see cref="ApplyAsync(UpdateRelease, CancellationToken)"/>:
-    /// pick the newest release; if it is newer than <paramref name="currentVersion"/>,
-    /// apply it, otherwise report <see cref="UpdateOutcome.UpToDate"/>.
+    /// Convenience over <see cref="GetReleasesAsync"/> + <see cref="ApplyAsync(UpdateAsset, CancellationToken)"/>:
+    /// pick the newest release (optionally restricted by <paramref name="releaseFilter"/>);
+    /// if it is newer than <paramref name="currentVersion"/>, select its asset with
+    /// <paramref name="assetSelector"/> and apply it, otherwise report
+    /// <see cref="UpdateOutcome.UpToDate"/>. If the newest release ships no asset the
+    /// selector accepts, reports <see cref="UpdateOutcome.NoAssetForPlatform"/>.
     /// </summary>
-    public async Task<UpdateResult> UpdateAsync(SemVer currentVersion, CancellationToken ct = default)
+    public async Task<UpdateResult> UpdateAsync(
+        SemVer currentVersion,
+        Func<UpdateAsset, bool> assetSelector,
+        Func<UpdateRelease, bool>? releaseFilter = null,
+        CancellationToken ct = default)
     {
         var releases = await GetReleasesAsync(ct).ConfigureAwait(false);
-        var newest = Newest(releases);
+        var newest = Newest(releases, releaseFilter);
         if (newest is null || newest.Version <= currentVersion)
             return new UpdateResult(UpdateOutcome.UpToDate, newest?.Version);
 
-        return await ApplyAsync(newest, ct).ConfigureAwait(false);
+        UpdateAsset? asset = null;
+        foreach (var candidate in newest.Assets)
+        {
+            if (assetSelector(candidate))
+            {
+                asset = candidate;
+                break;
+            }
+        }
+        if (asset is null)
+        {
+            _log.WriteLine($"No matching asset in release {newest.Version} for this platform.");
+            return new UpdateResult(UpdateOutcome.NoAssetForPlatform, newest.Version, "No matching asset.");
+        }
+
+        return await ApplyAssetAsync(asset, newest.Version, ct).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Pick the highest-version release, preferring one that actually has an asset
-    /// for this RID when two releases share the same version.
-    /// </summary>
-    private static UpdateRelease? Newest(IReadOnlyList<UpdateRelease> releases)
+    /// <summary>Pick the highest-version release, after applying an optional filter.</summary>
+    private static UpdateRelease? Newest(IReadOnlyList<UpdateRelease> releases, Func<UpdateRelease, bool>? filter)
     {
         UpdateRelease? best = null;
         foreach (var release in releases)
         {
-            if (best is null)
-            {
-                best = release;
+            if (filter is not null && !filter(release))
                 continue;
-            }
-            var cmp = release.Version.CompareTo(best.Version);
-            if (cmp > 0 || (cmp == 0 && release.Asset is not null && best.Asset is null))
+            if (best is null || release.Version > best.Version)
                 best = release;
         }
         return best;
@@ -223,6 +242,11 @@ public sealed class Updater
 
     private async Task<bool> ValidateAsync(string path, CancellationToken ct)
     {
+        // Validation is opt-in: with no args configured we do not execute the
+        // freshly downloaded binary, since there is no universally safe probe.
+        if (_options.ValidateArgs is not { Count: > 0 } validateArgs)
+            return true;
+
         try
         {
             var psi = new ProcessStartInfo
@@ -231,7 +255,7 @@ public sealed class Updater
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
-            foreach (var a in _options.ValidateArgs)
+            foreach (var a in validateArgs)
                 psi.ArgumentList.Add(a);
 
             using var proc = Process.Start(psi);

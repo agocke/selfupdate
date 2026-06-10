@@ -6,9 +6,22 @@ namespace SelfUpdater.Sources;
 
 /// <summary>
 /// Update source backed by the GitHub Releases API. Lists the repo's releases,
-/// parsing each <c>tag_name</c> as a version and selecting the asset whose file
-/// name matches the requested RID. The caller decides which release (if any) is
-/// newer than what it is running.
+/// parsing each <c>tag_name</c> as a version and exposing every asset of each
+/// release; the caller decides which release is newer than what it is running and
+/// which asset matches its platform.
+/// <para>
+/// Draft releases are skipped (they are unpublished); prereleases are included and
+/// flagged via <see cref="UpdateRelease.IsPrerelease"/> so the caller can filter
+/// them. Only the first page of releases (the most recent ~30) is returned, which
+/// is sufficient for "is there anything newer than me" decisions.
+/// </para>
+/// <para>
+/// When GitHub reports an asset <c>digest</c> (e.g. <c>sha256:…</c>) it is surfaced
+/// as <see cref="UpdateAsset.Sha256"/>, so the engine verifies integrity of the
+/// download against GitHub's published hash. (This is integrity, not authenticity:
+/// it does not prove the publisher's identity — use signed releases/manifests for
+/// that.)
+/// </para>
 /// <para>
 /// Works with <b>private</b> repositories: supply <c>authToken</c> and the source
 /// authenticates the API call and downloads the asset through the authenticated
@@ -25,7 +38,6 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
     private readonly string _owner;
     private readonly string _repo;
     private readonly Func<CancellationToken, Task<string?>>? _authToken;
-    private readonly Func<string, string, bool> _assetMatches;
     private readonly HttpClient _http;
 
     /// <param name="owner">Repository owner (user or org).</param>
@@ -36,33 +48,24 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
     /// consumer can fetch/cache/refresh rotating, short-lived tokens (e.g. a vended
     /// GitHub App installation token) however it likes.
     /// </param>
-    /// <param name="assetMatches">
-    /// Predicate <c>(assetName, rid) =&gt; bool</c> selecting the asset for a RID.
-    /// Defaults to a case-insensitive substring match on the RID.
-    /// </param>
     /// <param name="http">Optional pre-configured <see cref="HttpClient"/> (e.g. with proxy/handlers).</param>
     public GitHubReleaseUpdateSource(
         string owner,
         string repo,
         Func<CancellationToken, Task<string?>>? authToken = null,
-        Func<string, string, bool>? assetMatches = null,
         HttpClient? http = null)
     {
         _owner = owner;
         _repo = repo;
         _authToken = authToken;
-        _assetMatches = assetMatches ?? DefaultAssetMatches;
         _http = http ?? new HttpClient();
         if (!_http.DefaultRequestHeaders.UserAgent.Any())
             _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("selfupdater", "1.0"));
     }
 
-    private static bool DefaultAssetMatches(string assetName, string rid) =>
-        assetName.Contains(rid, StringComparison.OrdinalIgnoreCase);
-
     private bool IsPrivate => _authToken is not null;
 
-    public async Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(string rid, CancellationToken ct = default)
+    public async Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(CancellationToken ct = default)
     {
         var url = $"https://api.github.com/repos/{_owner}/{_repo}/releases";
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
@@ -96,25 +99,36 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
         var result = new List<UpdateRelease>(releases.Count);
         foreach (var release in releases)
         {
+            if (release.Draft == true)
+                continue;
             if (SemVer.TryParse(release.TagName, out var version))
-                result.Add(new UpdateRelease(version, MatchAsset(release, rid)));
+                result.Add(new UpdateRelease(version, MapAssets(release), (release.Prerelease ?? false) || version.IsPrerelease));
         }
         return result;
     }
 
-    private UpdateAsset? MatchAsset(GitHubRelease release, string rid)
+    private IReadOnlyList<UpdateAsset> MapAssets(GitHubRelease release)
     {
+        var assets = new List<UpdateAsset>(release.Assets.Count);
         foreach (var a in release.Assets)
         {
-            if (_assetMatches(a.Name, rid))
-            {
-                // For private repos download through the authenticated asset API
-                // endpoint; for public repos the browser URL needs no credentials.
-                var location = IsPrivate ? (a.Url ?? a.BrowserDownloadUrl) : a.BrowserDownloadUrl;
-                return new UpdateAsset(rid, location, Size: a.Size);
-            }
+            // For private repos download through the authenticated asset API
+            // endpoint; for public repos the browser URL needs no credentials.
+            var location = IsPrivate ? (a.Url ?? a.BrowserDownloadUrl) : a.BrowserDownloadUrl;
+            assets.Add(new UpdateAsset(a.Name, location, ParseDigest(a.Digest), a.Size));
         }
-        return null;
+        return assets;
+    }
+
+    /// <summary>GitHub reports asset digests as "&lt;algo&gt;:&lt;hex&gt;"; we use the SHA-256 hex.</summary>
+    private static string? ParseDigest(string? digest)
+    {
+        if (string.IsNullOrEmpty(digest))
+            return null;
+        const string prefix = "sha256:";
+        return digest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            ? digest[prefix.Length..]
+            : null;
     }
 
     public async Task<Stream> OpenAssetAsync(UpdateAsset asset, CancellationToken ct = default)
@@ -146,6 +160,10 @@ public sealed partial record GitHubRelease
     [SerdeMemberOptions(Rename = "tag_name")]
     public required string TagName { get; init; }
 
+    public bool? Draft { get; init; }
+
+    public bool? Prerelease { get; init; }
+
     public required List<GitHubAsset> Assets { get; init; }
 }
 
@@ -159,6 +177,9 @@ public sealed partial record GitHubAsset
 
     [SerdeMemberOptions(Rename = "browser_download_url")]
     public required string BrowserDownloadUrl { get; init; }
+
+    /// <summary>GitHub-published content digest, e.g. <c>sha256:…</c> (may be absent).</summary>
+    public string? Digest { get; init; }
 
     public long? Size { get; init; }
 }
