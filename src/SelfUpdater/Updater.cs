@@ -1,10 +1,9 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace SelfUpdater;
 
-/// <summary>Result of comparing the running build against a source's latest release.</summary>
+/// <summary>Result of comparing the running build against a source's releases.</summary>
 public sealed record UpdateCheck(bool UpdateAvailable, SemVer Current, SemVer? Latest, UpdateAsset? Asset);
 
 public enum UpdateOutcome
@@ -25,9 +24,6 @@ public sealed record UpdateResult(UpdateOutcome Outcome, SemVer? Version = null,
 
 public sealed class UpdaterOptions
 {
-    /// <summary>The version the running process reports as its own.</summary>
-    public required SemVer CurrentVersion { get; init; }
-
     /// <summary>Runtime identifier to request from the source (defaults to the running RID).</summary>
     public string Rid { get; init; } = RuntimeInformation.RuntimeIdentifier;
 
@@ -47,10 +43,20 @@ public sealed class UpdaterOptions
 }
 
 /// <summary>
-/// Source-agnostic self-update engine, modeled on dnvm: check a version, download
-/// the matching asset, verify and validate it, then hand off to the new binary
-/// which replaces the old one in place (a two-process swap so a running
-/// executable can update itself, including on Windows).
+/// Source-agnostic self-update engine, modeled on dnvm: list the releases a
+/// source offers, download a chosen one's matching asset, verify and validate it,
+/// then hand off to the new binary which replaces the old one in place (a
+/// two-process swap so a running executable can update itself, including on
+/// Windows).
+/// <para>
+/// The engine is deliberately <b>policy-free</b>: it neither knows nor fetches the
+/// caller's current version, and it never decides what counts as "new". The caller
+/// owns its version and the comparison. Use <see cref="GetReleasesAsync"/> +
+/// <see cref="ApplyAsync(UpdateRelease, CancellationToken)"/> for full control, or
+/// the <see cref="UpdateAsync(SemVer, CancellationToken)"/> / <see cref="CheckAsync(SemVer, CancellationToken)"/>
+/// convenience overloads (which take the caller's current version and apply the
+/// common "newest wins" policy) for the simple case.
+/// </para>
 /// </summary>
 public sealed class Updater
 {
@@ -73,71 +79,106 @@ public sealed class Updater
         _log = options.Log;
     }
 
-    /// <summary>Reads the informational version of the entry assembly as a <see cref="SemVer"/>.</summary>
-    public static SemVer CurrentAssemblyVersion()
+    /// <summary>
+    /// List the releases the source offers for this RID. The caller compares them
+    /// against its own current version to decide whether any are new; this method
+    /// applies no policy of its own.
+    /// </summary>
+    public Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(CancellationToken ct = default) =>
+        _source.GetReleasesAsync(_options.Rid, ct);
+
+    /// <summary>
+    /// Download, validate, and stage a release the caller has chosen, then hand off
+    /// to the new binary. Performs <b>no</b> version comparison — it applies exactly
+    /// the release it is given. The caller is responsible for having decided this
+    /// release is newer than what it is running.
+    /// </summary>
+    public async Task<UpdateResult> ApplyAsync(UpdateRelease release, CancellationToken ct = default)
     {
-        var asm = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
-        var info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-        if (info is not null && SemVer.TryParse(info, out var v))
-            return v;
-        var name = asm.GetName().Version;
-        return name is null ? new SemVer(0, 0, 0) : new SemVer(name.Major, name.Minor, name.Build < 0 ? 0 : name.Build);
-    }
-
-    public async Task<UpdateCheck> CheckAsync(CancellationToken ct = default)
-    {
-        _log.WriteLine($"Checking for updates (current {_options.CurrentVersion}, rid {_options.Rid})...");
-        var release = await _source.GetLatestReleaseAsync(_options.Rid, ct).ConfigureAwait(false);
-        if (release is null)
+        if (release.Asset is null)
         {
-            _log.WriteLine("Update source returned no release information.");
-            return new UpdateCheck(false, _options.CurrentVersion, null, null);
-        }
-
-        if (release.Version <= _options.CurrentVersion)
-        {
-            _log.WriteLine($"Up to date (latest {release.Version}).");
-            return new UpdateCheck(false, _options.CurrentVersion, release.Version, release.Asset);
-        }
-
-        _log.WriteLine($"Update available: {release.Version}");
-        return new UpdateCheck(true, _options.CurrentVersion, release.Version, release.Asset);
-    }
-
-    public async Task<UpdateResult> UpdateAsync(CancellationToken ct = default)
-    {
-        var check = await CheckAsync(ct).ConfigureAwait(false);
-        if (!check.UpdateAvailable)
-            return new UpdateResult(UpdateOutcome.UpToDate, check.Latest);
-
-        if (check.Asset is null)
-        {
-            _log.WriteLine($"No asset for rid '{_options.Rid}' in release {check.Latest}.");
-            return new UpdateResult(UpdateOutcome.NoAssetForPlatform, check.Latest,
+            _log.WriteLine($"No asset for rid '{_options.Rid}' in release {release.Version}.");
+            return new UpdateResult(UpdateOutcome.NoAssetForPlatform, release.Version,
                 $"No artifact for {_options.Rid}.");
         }
 
         if (!_options.AllowNonSingleFile && !Utilities.IsSingleFile())
         {
             _log.WriteLine("Cannot self-update: not deployed as a single file (e.g. running via 'dotnet run').");
-            return new UpdateResult(UpdateOutcome.NotSelfContained, check.Latest);
+            return new UpdateResult(UpdateOutcome.NotSelfContained, release.Version);
         }
 
         var target = _options.TargetPath ?? Utilities.ProcessPath;
         if (string.IsNullOrEmpty(target))
         {
             _log.WriteLine("Cannot self-update: unable to determine the target executable path.");
-            return new UpdateResult(UpdateOutcome.Failed, check.Latest, "Unknown target path.");
+            return new UpdateResult(UpdateOutcome.Failed, release.Version, "Unknown target path.");
         }
 
-        var staged = await DownloadAndValidateAsync(check.Asset, target, ct).ConfigureAwait(false);
+        var staged = await DownloadAndValidateAsync(release.Asset, target, ct).ConfigureAwait(false);
         if (staged is null)
-            return new UpdateResult(UpdateOutcome.Failed, check.Latest, "Download or validation failed.");
+            return new UpdateResult(UpdateOutcome.Failed, release.Version, "Download or validation failed.");
 
         if (!LaunchHandoff(staged, target))
-            return new UpdateResult(UpdateOutcome.Failed, check.Latest, "Could not launch the handoff process.");
+            return new UpdateResult(UpdateOutcome.Failed, release.Version, "Could not launch the handoff process.");
 
-        return new UpdateResult(UpdateOutcome.Staged, check.Latest);
+        return new UpdateResult(UpdateOutcome.Staged, release.Version);
+    }
+
+    /// <summary>
+    /// Convenience over <see cref="GetReleasesAsync"/>: report whether any release
+    /// is newer than <paramref name="currentVersion"/>, returning the newest one.
+    /// </summary>
+    public async Task<UpdateCheck> CheckAsync(SemVer currentVersion, CancellationToken ct = default)
+    {
+        _log.WriteLine($"Checking for updates (current {currentVersion}, rid {_options.Rid})...");
+        var releases = await GetReleasesAsync(ct).ConfigureAwait(false);
+        var newest = Newest(releases);
+        if (newest is null)
+        {
+            _log.WriteLine("Update source returned no release information.");
+            return new UpdateCheck(false, currentVersion, null, null);
+        }
+
+        var available = newest.Version > currentVersion;
+        _log.WriteLine(available ? $"Update available: {newest.Version}" : $"Up to date (latest {newest.Version}).");
+        return new UpdateCheck(available, currentVersion, newest.Version, newest.Asset);
+    }
+
+    /// <summary>
+    /// Convenience over <see cref="GetReleasesAsync"/> + <see cref="ApplyAsync(UpdateRelease, CancellationToken)"/>:
+    /// pick the newest release; if it is newer than <paramref name="currentVersion"/>,
+    /// apply it, otherwise report <see cref="UpdateOutcome.UpToDate"/>.
+    /// </summary>
+    public async Task<UpdateResult> UpdateAsync(SemVer currentVersion, CancellationToken ct = default)
+    {
+        var releases = await GetReleasesAsync(ct).ConfigureAwait(false);
+        var newest = Newest(releases);
+        if (newest is null || newest.Version <= currentVersion)
+            return new UpdateResult(UpdateOutcome.UpToDate, newest?.Version);
+
+        return await ApplyAsync(newest, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Pick the highest-version release, preferring one that actually has an asset
+    /// for this RID when two releases share the same version.
+    /// </summary>
+    private static UpdateRelease? Newest(IReadOnlyList<UpdateRelease> releases)
+    {
+        UpdateRelease? best = null;
+        foreach (var release in releases)
+        {
+            if (best is null)
+            {
+                best = release;
+                continue;
+            }
+            var cmp = release.Version.CompareTo(best.Version);
+            if (cmp > 0 || (cmp == 0 && release.Asset is not null && best.Asset is null))
+                best = release;
+        }
+        return best;
     }
 
     private async Task<string?> DownloadAndValidateAsync(UpdateAsset asset, string target, CancellationToken ct)

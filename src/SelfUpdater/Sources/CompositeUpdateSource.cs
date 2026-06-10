@@ -4,11 +4,11 @@ namespace SelfUpdater.Sources;
 
 /// <summary>
 /// Combines several <see cref="IUpdateSource"/> backends into one. Every reachable
-/// backend is queried; the newest version wins (ties prefer a backend that
-/// actually has an asset for this RID, then earlier list order). Backends that
-/// are unreachable or fail to parse are skipped, so listing a primary and a
-/// mirror gives automatic fallback. Downloads are routed back to whichever
-/// backend produced the winning asset.
+/// backend is queried and their releases are merged into a single list, so the
+/// caller sees the union of builds across all backends. Backends that are
+/// unreachable or fail to parse are skipped, so listing a primary and a mirror
+/// gives automatic fallback. Downloads are routed back to whichever backend
+/// produced the chosen asset.
 /// </summary>
 public sealed class CompositeUpdateSource : IUpdateSource
 {
@@ -25,27 +25,22 @@ public sealed class CompositeUpdateSource : IUpdateSource
         _sources = sources;
     }
 
-    public async Task<UpdateRelease?> GetLatestReleaseAsync(string rid, CancellationToken ct = default)
+    public async Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(string rid, CancellationToken ct = default)
     {
-        var releases = await Task.WhenAll(
+        var perSource = await Task.WhenAll(
             _sources.Select(s => SafeGetAsync(s, rid, ct))).ConfigureAwait(false);
 
-        (IUpdateSource Source, UpdateRelease Release)? best = null;
-        for (var i = 0; i < releases.Length; i++)
+        var merged = new List<UpdateRelease>();
+        for (var i = 0; i < perSource.Length; i++)
         {
-            if (releases[i] is not { } release)
-                continue;
-            if (best is not { } b || IsBetter(release, b.Release))
-                best = (_sources[i], release);
+            foreach (var release in perSource[i])
+            {
+                if (release.Asset is { } asset)
+                    _assetOwners.AddOrUpdate(asset, _sources[i]);
+                merged.Add(release);
+            }
         }
-
-        if (best is not { } winner)
-            return null;
-
-        if (winner.Release.Asset is { } asset)
-            _assetOwners.AddOrUpdate(asset, winner.Source);
-
-        return winner.Release;
+        return merged;
     }
 
     public Task<Stream> OpenAssetAsync(UpdateAsset asset, CancellationToken ct = default)
@@ -53,8 +48,8 @@ public sealed class CompositeUpdateSource : IUpdateSource
         if (_assetOwners.TryGetValue(asset, out var owner))
             return owner.OpenAssetAsync(asset, ct);
 
-        // Asset wasn't produced by a GetLatestReleaseAsync on this composite; fall
-        // back to trying each backend in order.
+        // Asset wasn't produced by a GetReleasesAsync on this composite; fall back
+        // to trying each backend in order.
         return OpenViaFallbackAsync(asset, ct);
     }
 
@@ -74,24 +69,16 @@ public sealed class CompositeUpdateSource : IUpdateSource
         throw new InvalidOperationException("No backend could open the requested asset.");
     }
 
-    private static bool IsBetter(UpdateRelease candidate, UpdateRelease current)
-    {
-        var cmp = candidate.Version.CompareTo(current.Version);
-        if (cmp != 0)
-            return cmp > 0;
-        // Same version: prefer the one that actually has a downloadable asset.
-        return candidate.Asset is not null && current.Asset is null;
-    }
-
-    private static async Task<UpdateRelease?> SafeGetAsync(IUpdateSource source, string rid, CancellationToken ct)
+    private static async Task<IReadOnlyList<UpdateRelease>> SafeGetAsync(
+        IUpdateSource source, string rid, CancellationToken ct)
     {
         try
         {
-            return await source.GetLatestReleaseAsync(rid, ct).ConfigureAwait(false);
+            return await source.GetReleasesAsync(rid, ct).ConfigureAwait(false);
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {
-            return null;
+            return [];
         }
     }
 }

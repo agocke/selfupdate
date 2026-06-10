@@ -9,26 +9,30 @@ namespace SelfUpdater;
 /// </summary>
 public sealed record UpdateAsset(string Rid, string Location, string? Sha256 = null, long? Size = null);
 
-/// <summary>The newest release a source knows about, plus the asset for the requested RID (if any).</summary>
+/// <summary>A release a source knows about, plus the asset for the requested RID (if any).</summary>
 public sealed record UpdateRelease(SemVer Version, UpdateAsset? Asset);
 
 /// <summary>
 /// Pluggable strategy for discovering and fetching new builds. This is the seam
 /// that keeps the updater independent of any particular distribution mechanism:
-/// the engine only ever asks "what's the latest build for my RID?" and "give me
-/// a stream of this asset's bytes". Concrete sources decide *where* builds live
-/// and *how* they are described (a JSON manifest, a GitHub release, a package
-/// feed, a LAN share, ...).
+/// the engine only ever asks "what builds exist for my RID?" and "give me a
+/// stream of this asset's bytes". Concrete sources decide *where* builds live and
+/// *how* they are described (a JSON manifest, a GitHub release, a package feed, a
+/// LAN share, ...). Sources never compare versions or decide what is "new" — that
+/// policy belongs to the caller, which knows its own current version.
 /// </summary>
 public interface IUpdateSource
 {
     /// <summary>
-    /// Resolve the latest available release and the asset matching <paramref name="rid"/>.
-    /// Returns <c>null</c> if the source could not be reached or parsed. The
-    /// release's <see cref="UpdateRelease.Asset"/> may be <c>null</c> when a newer
-    /// version exists but ships nothing for this platform.
+    /// List the releases this source knows about, each with the asset matching
+    /// <paramref name="rid"/> (if any). Returns an empty list if the source could
+    /// not be reached or parsed. A release's <see cref="UpdateRelease.Asset"/> may
+    /// be <c>null</c> when that version ships nothing for this platform. Order is
+    /// not significant; the caller decides which (if any) releases are newer than
+    /// what it is running. Sources that only track a single "latest" build return
+    /// a one-element list.
     /// </summary>
-    Task<UpdateRelease?> GetLatestReleaseAsync(string rid, CancellationToken ct = default);
+    Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(string rid, CancellationToken ct = default);
 
     /// <summary>Open a read stream over an asset's bytes for downloading.</summary>
     Task<Stream> OpenAssetAsync(UpdateAsset asset, CancellationToken ct = default);

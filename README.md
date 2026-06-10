@@ -23,10 +23,14 @@ Everything hangs off one seam, `IUpdateSource`:
 ```csharp
 public interface IUpdateSource
 {
-    Task<UpdateRelease?> GetLatestReleaseAsync(string rid, CancellationToken ct = default);
+    Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(string rid, CancellationToken ct = default);
     Task<Stream> OpenAssetAsync(UpdateAsset asset, CancellationToken ct = default);
 }
 ```
+
+A source only ever *lists* what builds exist — it never compares versions or
+decides what counts as "new". That policy stays with the caller, which knows its
+own current version.
 
 Backends in the box:
 
@@ -35,11 +39,14 @@ Backends in the box:
 | `HttpManifestUpdateSource` | A `releases.json` you publish yourself (CDN, Pages, blob store). Relative or absolute asset URLs. |
 | `DirectoryUpdateSource` | A local folder or network share — LAN/offline/air-gapped rollouts, and tests. |
 | `GitHubReleaseUpdateSource` | GitHub Releases. Public repos need nothing; **private** repos take an `authToken` delegate and download through the authenticated asset API. |
-| `CompositeUpdateSource` | Several backends at once: queries all reachable ones, picks the newest version, and routes the download back to the backend that produced it. Free fallback + mirrors. |
+| `CompositeUpdateSource` | Several backends at once: queries all reachable ones and merges their releases, then routes the download back to the backend that produced the chosen asset. Free fallback + mirrors. |
 
 Implementing your own (S3, a package feed, a torrent, ...) is just those two methods.
 
 ## Usage
+
+The engine is **policy-free**: you tell it your current version (it never fetches
+it for you), and it decides nothing about what is "new" unless you ask it to.
 
 ```csharp
 using SelfUpdater;
@@ -49,14 +56,30 @@ var source = new HttpManifestUpdateSource(new Uri("https://example.com/releases.
 
 var updater = new Updater(source, new UpdaterOptions
 {
-    CurrentVersion = Updater.CurrentAssemblyVersion(),
     // Rid defaults to RuntimeInformation.RuntimeIdentifier
     // TargetPath defaults to the running executable
 });
 
-var result = await updater.UpdateAsync();
+// You own the current version and the comparison.
+SemVer current = SemVer.Parse(MyApp.Version);
+
+var result = await updater.UpdateAsync(current); // newest-wins convenience overload
 if (result.Outcome == UpdateOutcome.Staged)
     return 0; // a newer build was handed off; this process should now exit
+```
+
+Need full control over which release to apply (skip prereleases, pin a channel,
+roll back, ...)? Drop to the policy-free core:
+
+```csharp
+var releases = await updater.GetReleasesAsync();
+var chosen = releases
+    .Where(r => r.Version > current && !r.Version.IsPrerelease)
+    .OrderByDescending(r => r.Version)
+    .FirstOrDefault();
+
+if (chosen is not null)
+    await updater.ApplyAsync(chosen);
 ```
 
 ### The handoff command
