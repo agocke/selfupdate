@@ -36,11 +36,3 @@ internal static class Utilities
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 }
-
-internal static class SerdeExtensions
-{
-    extension<T>(List<T> list) where T : IDeserializeProvider<T>
-    {
-        public IDeserialize<List<T>> Deserialize => ListProxy.De<T, T>.Instance;
-    }
-}
