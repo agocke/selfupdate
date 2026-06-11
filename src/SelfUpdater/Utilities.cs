@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Security.Cryptography;
+using Serde;
 
 namespace SelfUpdater;
 
@@ -14,8 +15,10 @@ internal static class Utilities
     /// exactly the signal we want here.
     /// </summary>
     [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage(
-        "SingleFile", "IL3000",
-        Justification = "An empty Location is precisely the single-file signal we test for.")]
+        "SingleFile",
+        "IL3000",
+        Justification = "An empty Location is precisely the single-file signal we test for."
+    )]
     public static bool IsSingleFile() =>
         string.IsNullOrEmpty(Assembly.GetEntryAssembly()?.Location);
 
