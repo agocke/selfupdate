@@ -1,9 +1,10 @@
 using System.Diagnostics;
+using Semver;
 
 namespace SelfUpdater;
 
 /// <summary>Result of comparing the running build against a source's releases.</summary>
-public sealed record UpdateCheck(bool UpdateAvailable, SemVer Current, UpdateRelease? Latest);
+public sealed record UpdateCheck(bool UpdateAvailable, SemVersion Current, UpdateRelease? Latest);
 
 public enum UpdateOutcome
 {
@@ -19,7 +20,7 @@ public enum UpdateOutcome
     Failed,
 }
 
-public sealed record UpdateResult(UpdateOutcome Outcome, SemVer? Version = null, string? Message = null);
+public sealed record UpdateResult(UpdateOutcome Outcome, SemVersion? Version = null, string? Message = null);
 
 public sealed class UpdaterOptions
 {
@@ -99,7 +100,7 @@ public sealed class Updater
     public Task<UpdateResult> ApplyAsync(UpdateAsset asset, CancellationToken ct = default) =>
         ApplyAssetAsync(asset, version: null, ct);
 
-    private async Task<UpdateResult> ApplyAssetAsync(UpdateAsset asset, SemVer? version, CancellationToken ct)
+    private async Task<UpdateResult> ApplyAssetAsync(UpdateAsset asset, SemVersion? version, CancellationToken ct)
     {
         if (!_options.AllowNonSingleFile && !Utilities.IsSingleFile())
         {
@@ -131,7 +132,7 @@ public sealed class Updater
     /// <c>r =&gt; !r.IsPrerelease</c> to ignore prereleases).
     /// </summary>
     public async Task<UpdateCheck> CheckAsync(
-        SemVer currentVersion,
+        SemVersion currentVersion,
         Func<UpdateRelease, bool>? releaseFilter = null,
         CancellationToken ct = default)
     {
@@ -144,7 +145,7 @@ public sealed class Updater
             return new UpdateCheck(false, currentVersion, null);
         }
 
-        var available = newest.Version > currentVersion;
+        var available = newest.Version.ComparePrecedenceTo(currentVersion) > 0;
         _log.WriteLine(available ? $"Update available: {newest.Version}" : $"Up to date (latest {newest.Version}).");
         return new UpdateCheck(available, currentVersion, newest);
     }
@@ -158,14 +159,14 @@ public sealed class Updater
     /// selector accepts, reports <see cref="UpdateOutcome.NoAssetForPlatform"/>.
     /// </summary>
     public async Task<UpdateResult> UpdateAsync(
-        SemVer currentVersion,
+        SemVersion currentVersion,
         Func<UpdateAsset, bool> assetSelector,
         Func<UpdateRelease, bool>? releaseFilter = null,
         CancellationToken ct = default)
     {
         var releases = await GetReleasesAsync(ct).ConfigureAwait(false);
         var newest = Newest(releases, releaseFilter);
-        if (newest is null || newest.Version <= currentVersion)
+        if (newest is null || newest.Version.ComparePrecedenceTo(currentVersion) <= 0)
             return new UpdateResult(UpdateOutcome.UpToDate, newest?.Version);
 
         UpdateAsset? asset = null;
@@ -194,7 +195,7 @@ public sealed class Updater
         {
             if (filter is not null && !filter(release))
                 continue;
-            if (best is null || release.Version > best.Version)
+            if (best is null || release.Version.ComparePrecedenceTo(best.Version) > 0)
                 best = release;
         }
         return best;

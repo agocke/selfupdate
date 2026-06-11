@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 
+using Semver;
 using SelfUpdater;
 using SelfUpdater.Sources;
 
@@ -9,14 +10,18 @@ namespace SelfUpdater.Tests;
 public class SelfUpdaterTests
 {
     [Theory]
-    [InlineData("1.2.3", 1, 2, 3, null)]
-    [InlineData("v0.1.0", 0, 1, 0, null)]
-    [InlineData("2.0", 2, 0, 0, null)]
+    [InlineData("1.2.3", 1, 2, 3, "")]
+    [InlineData("v0.1.0", 0, 1, 0, "")]
+    [InlineData("2.0", 2, 0, 0, "")]
     [InlineData("1.2.3-beta.1+build7", 1, 2, 3, "beta.1")]
-    public void SemVer_Parses(string text, int major, int minor, int patch, string? pre)
+    public void Version_ParsesLenientForms(string text, int major, int minor, int patch, string pre)
     {
-        Assert.True(SemVer.TryParse(text, out var v));
-        Assert.Equal(new SemVer(major, minor, patch, pre), v);
+        Assert.True(SemVersion.TryParse(text, SemVersionStyles.Any, out var v));
+        Assert.Equal(major, v.Major);
+        Assert.Equal(minor, v.Minor);
+        Assert.Equal(patch, v.Patch);
+        Assert.Equal(pre, v.Prerelease);
+        Assert.Equal(pre.Length > 0, v.IsPrerelease);
     }
 
     [Theory]
@@ -24,92 +29,20 @@ public class SelfUpdaterTests
     [InlineData("1.2.3.4")]
     [InlineData("1.-2.3")]
     [InlineData("")]
-    public void SemVer_RejectsInvalid(string text) =>
-        Assert.False(SemVer.TryParse(text, out _));
+    public void Version_RejectsInvalid(string text) =>
+        Assert.False(SemVersion.TryParse(text, SemVersionStyles.Any, out _));
 
     [Fact]
-    public void SemVer_Orders()
+    public void Version_OrdersByPrecedence()
     {
-        Assert.True(SemVer.Parse("1.0.0") < SemVer.Parse("1.0.1"));
-        Assert.True(SemVer.Parse("1.2.0") > SemVer.Parse("1.1.9"));
+        Assert.True(V("1.0.0").ComparePrecedenceTo(V("1.0.1")) < 0);
+        Assert.True(V("1.2.0").ComparePrecedenceTo(V("1.1.9")) > 0);
         // Prerelease sorts below its release.
-        Assert.True(SemVer.Parse("1.0.0-beta") < SemVer.Parse("1.0.0"));
-        Assert.True(SemVer.Parse("1.0.0-alpha") < SemVer.Parse("1.0.0-beta"));
-        Assert.True(SemVer.Parse("1.0.0-alpha.1") < SemVer.Parse("1.0.0-alpha.2"));
-        // Build metadata is ignored.
-        Assert.Equal(SemVer.Parse("1.0.0+a"), SemVer.Parse("1.0.0+b"));
-    }
-
-    [Fact]
-    public void SemVer_IsPrerelease()
-    {
-        Assert.True(SemVer.Parse("1.0.0-rc.1").IsPrerelease);
-        Assert.False(SemVer.Parse("1.0.0").IsPrerelease);
-    }
-
-    [Fact]
-    public async Task HttpManifest_ExposesAllAssetsByName()
-    {
-        const string json = """
-        {
-          "releases": [
-            {
-              "version": "0.2.0",
-              "assets": {
-                "osx-arm64": { "url": "https://example/app-osx-arm64", "sha256": "abc" },
-                "linux-x64": { "url": "https://example/app-linux-x64" }
-              }
-            }
-          ]
-        }
-        """;
-        var source = new HttpManifestUpdateSource(
-            new Uri("https://example/releases.json"), StubClient(json));
-
-        var release = Assert.Single(await source.GetReleasesAsync());
-
-        Assert.Equal(SemVer.Parse("0.2.0"), release.Version);
-        Assert.Equal(2, release.Assets.Count);
-        var osx = Asset(release, "osx-arm64");
-        Assert.Equal("https://example/app-osx-arm64", osx.Location);
-        Assert.Equal("abc", osx.Sha256);
-        Assert.Equal("https://example/app-linux-x64", Asset(release, "linux-x64").Location);
-    }
-
-    [Fact]
-    public async Task HttpManifest_ResolvesRelativeAssetUrl()
-    {
-        const string json = """
-        { "releases": [ { "version": "0.2.0", "assets": { "osx-arm64": { "url": "bin/app-osx-arm64" } } } ] }
-        """;
-        var source = new HttpManifestUpdateSource(
-            new Uri("https://example/downloads/releases.json"), StubClient(json));
-
-        var release = Assert.Single(await source.GetReleasesAsync());
-
-        Assert.Equal("https://example/downloads/bin/app-osx-arm64", Asset(release, "osx-arm64").Location);
-    }
-
-    [Fact]
-    public async Task HttpManifest_ListsMultipleReleases()
-    {
-        const string json = """
-        {
-          "releases": [
-            { "version": "0.3.0", "assets": { "osx-arm64": { "url": "u3" } } },
-            { "version": "0.2.0", "prerelease": true, "assets": { "osx-arm64": { "url": "u2" } } }
-          ]
-        }
-        """;
-        var source = new HttpManifestUpdateSource(
-            new Uri("https://example/releases.json"), StubClient(json));
-
-        var releases = await source.GetReleasesAsync();
-
-        Assert.Equal(2, releases.Count);
-        var pre = releases.Single(r => r.Version == SemVer.Parse("0.2.0"));
-        Assert.True(pre.IsPrerelease);
-        Assert.False(releases.Single(r => r.Version == SemVer.Parse("0.3.0")).IsPrerelease);
+        Assert.True(V("1.0.0-beta").ComparePrecedenceTo(V("1.0.0")) < 0);
+        Assert.True(V("1.0.0-alpha").ComparePrecedenceTo(V("1.0.0-beta")) < 0);
+        Assert.True(V("1.0.0-alpha.1").ComparePrecedenceTo(V("1.0.0-alpha.2")) < 0);
+        // Build metadata does not affect precedence.
+        Assert.Equal(0, V("1.0.0+a").ComparePrecedenceTo(V("1.0.0+b")));
     }
 
     [Fact]
@@ -139,7 +72,7 @@ public class SelfUpdaterTests
         var releases = await source.GetReleasesAsync();
 
         Assert.Equal(2, releases.Count);
-        Assert.Equal(SemVer.Parse("0.3.0"), releases[0].Version);
+        Assert.Equal(V("0.3.0"), releases[0].Version);
         Assert.Equal(2, releases[0].Assets.Count);
         var osx = Asset(releases[0], "app-osx-arm64");
         Assert.Equal("https://dl/osx-030", osx.Location);
@@ -168,30 +101,37 @@ public class SelfUpdaterTests
 
         // The draft is gone; the prerelease is present and flagged.
         Assert.Equal(2, releases.Count);
-        Assert.DoesNotContain(releases, r => r.Version == SemVer.Parse("0.4.0"));
-        Assert.True(releases.Single(r => r.Version == SemVer.Parse("0.3.0")).IsPrerelease);
-        Assert.False(releases.Single(r => r.Version == SemVer.Parse("0.2.0")).IsPrerelease);
+        Assert.DoesNotContain(releases, r => r.Version == V("0.4.0"));
+        Assert.True(releases.Single(r => r.Version == V("0.3.0")).IsPrerelease);
+        Assert.False(releases.Single(r => r.Version == V("0.2.0")).IsPrerelease);
     }
 
     [Fact]
-    public async Task DirectorySource_ReadsManifestAndOpensAsset()
+    public async Task DirectorySource_ListsBinariesByConventionAndOpensAsset()
     {
         var dir = Directory.CreateTempSubdirectory("selfupdater-test-").FullName;
         try
         {
-            File.WriteAllText(Path.Combine(dir, "app-osx-arm64"), "the-binary-bytes");
-            File.WriteAllText(Path.Combine(dir, "releases.json"), """
-            { "releases": [ { "version": "1.5.0", "assets": { "osx-arm64": { "url": "app-osx-arm64" } } } ] }
-            """);
-            var source = new DirectoryUpdateSource(dir);
+            File.WriteAllText(Path.Combine(dir, "myapp-1.5.0-osx-arm64"), "the-binary-bytes");
+            File.WriteAllText(Path.Combine(dir, "myapp-1.5.0-linux-x64"), "linux-bytes");
+            // Sidecar checksum (sha256sum format) is picked up for the osx binary only.
+            File.WriteAllText(Path.Combine(dir, "myapp-1.5.0-osx-arm64.sha256"), "abc123  myapp-1.5.0-osx-arm64\n");
+            // Unrelated files are ignored.
+            File.WriteAllText(Path.Combine(dir, "notes.txt"), "ignore me");
+
+            var source = new DirectoryUpdateSource(dir, "myapp");
 
             var release = Assert.Single(await source.GetReleasesAsync());
 
-            Assert.Equal(SemVer.Parse("1.5.0"), release.Version);
-            var asset = Asset(release, "osx-arm64");
-            Assert.Equal(Path.Combine(dir, "app-osx-arm64"), asset.Location);
+            Assert.Equal(V("1.5.0"), release.Version);
+            Assert.Equal(2, release.Assets.Count);
 
-            await using var stream = await source.OpenAssetAsync(asset);
+            var osx = Asset(release, "osx-arm64");
+            Assert.Equal(Path.Combine(dir, "myapp-1.5.0-osx-arm64"), osx.Location);
+            Assert.Equal("abc123", osx.Sha256);
+            Assert.Null(Asset(release, "linux-x64").Sha256);
+
+            await using var stream = await source.OpenAssetAsync(osx);
             using var reader = new StreamReader(stream);
             Assert.Equal("the-binary-bytes", await reader.ReadToEndAsync());
         }
@@ -202,13 +142,29 @@ public class SelfUpdaterTests
     }
 
     [Fact]
-    public async Task DirectorySource_MissingManifestReturnsEmpty()
+    public async Task DirectorySource_GroupsReleasesAndFlagsPrereleasesViaCustomParser()
     {
         var dir = Directory.CreateTempSubdirectory("selfupdater-test-").FullName;
         try
         {
-            var source = new DirectoryUpdateSource(dir);
-            Assert.Empty(await source.GetReleasesAsync());
+            File.WriteAllText(Path.Combine(dir, "myapp-2.0.0-osx-arm64"), "stable");
+            File.WriteAllText(Path.Combine(dir, "myapp-3.0.0-rc.1-osx-arm64"), "rc");
+
+            // Custom parser handles the prerelease tag the default convention can't split.
+            var source = new DirectoryUpdateSource(dir, "myapp", fileName =>
+            {
+                const string prefix = "myapp-";
+                if (!fileName.StartsWith(prefix) || !fileName.EndsWith("-osx-arm64"))
+                    return null;
+                var version = fileName[prefix.Length..^"-osx-arm64".Length];
+                return SemVersion.TryParse(version, SemVersionStyles.Any, out var v) ? (v, "osx-arm64") : null;
+            });
+
+            var releases = await source.GetReleasesAsync();
+
+            Assert.Equal(2, releases.Count);
+            Assert.True(releases.Single(r => r.Version == V("3.0.0-rc.1")).IsPrerelease);
+            Assert.False(releases.Single(r => r.Version == V("2.0.0")).IsPrerelease);
         }
         finally
         {
@@ -217,57 +173,25 @@ public class SelfUpdaterTests
     }
 
     [Fact]
-    public async Task Composite_MergesReleasesAndRoutesDownload()
+    public async Task DirectorySource_MissingDirectoryReturnsEmpty()
     {
-        var older = new FakeSource(new UpdateRelease(
-            SemVer.Parse("1.0.0"), [new UpdateAsset("app", "from-older")]), "older-bytes");
-        var newer = new FakeSource(new UpdateRelease(
-            SemVer.Parse("2.0.0"), [new UpdateAsset("app", "from-newer")]), "newer-bytes");
-
-        var composite = new CompositeUpdateSource(older, newer);
-
-        var releases = await composite.GetReleasesAsync();
-        Assert.Equal(2, releases.Count);
-
-        // The download must be routed back to the backend that produced the asset.
-        var chosen = releases.Single(r => r.Version == SemVer.Parse("2.0.0"));
-        await using var stream = await composite.OpenAssetAsync(chosen.Assets[0]);
-        using var reader = new StreamReader(stream);
-        Assert.Equal("newer-bytes", await reader.ReadToEndAsync());
-    }
-
-    [Fact]
-    public async Task Composite_SkipsUnreachableBackends()
-    {
-        var broken = new ThrowingSource();
-        var working = new FakeSource(new UpdateRelease(
-            SemVer.Parse("1.2.3"), [new UpdateAsset("app", "loc")]), "bytes");
-
-        var composite = new CompositeUpdateSource(broken, working);
-
-        var release = Assert.Single(await composite.GetReleasesAsync());
-        Assert.Equal(SemVer.Parse("1.2.3"), release.Version);
-    }
-
-    [Fact]
-    public async Task Composite_AllBackendsDownReturnsEmpty()
-    {
-        var composite = new CompositeUpdateSource(new ThrowingSource(), new ThrowingSource());
-        Assert.Empty(await composite.GetReleasesAsync());
+        var dir = Path.Combine(Path.GetTempPath(), "selfupdater-missing-" + Path.GetRandomFileName());
+        var source = new DirectoryUpdateSource(dir, "myapp");
+        Assert.Empty(await source.GetReleasesAsync());
     }
 
     [Fact]
     public async Task Updater_DetectsAvailableAndUpToDate()
     {
         var newer = new FakeSource(new UpdateRelease(
-            SemVer.Parse("9.9.9"), [new UpdateAsset("app", "https://dl")]));
-        var available = await new Updater(newer, Options()).CheckAsync(SemVer.Parse("1.0.0"));
+            V("9.9.9"), [new UpdateAsset("app", "https://dl")]));
+        var available = await new Updater(newer, Options()).CheckAsync(V("1.0.0"));
         Assert.True(available.UpdateAvailable);
-        Assert.Equal(SemVer.Parse("9.9.9"), available.Latest!.Version);
+        Assert.Equal(V("9.9.9"), available.Latest!.Version);
 
         var same = new FakeSource(new UpdateRelease(
-            SemVer.Parse("1.0.0"), [new UpdateAsset("app", "https://dl")]));
-        var upToDate = await new Updater(same, Options()).CheckAsync(SemVer.Parse("1.0.0"));
+            V("1.0.0"), [new UpdateAsset("app", "https://dl")]));
+        var upToDate = await new Updater(same, Options()).CheckAsync(V("1.0.0"));
         Assert.False(upToDate.UpdateAvailable);
     }
 
@@ -275,30 +199,30 @@ public class SelfUpdaterTests
     public async Task Updater_PicksNewestAcrossMultipleReleases()
     {
         var source = new FakeSource(
-            new UpdateRelease(SemVer.Parse("1.0.0"), [new UpdateAsset("app", "v1")]),
-            new UpdateRelease(SemVer.Parse("3.0.0"), [new UpdateAsset("app", "v3")]),
-            new UpdateRelease(SemVer.Parse("2.0.0"), [new UpdateAsset("app", "v2")]));
+            new UpdateRelease(V("1.0.0"), [new UpdateAsset("app", "v1")]),
+            new UpdateRelease(V("3.0.0"), [new UpdateAsset("app", "v3")]),
+            new UpdateRelease(V("2.0.0"), [new UpdateAsset("app", "v2")]));
 
-        var check = await new Updater(source, Options()).CheckAsync(SemVer.Parse("1.5.0"));
+        var check = await new Updater(source, Options()).CheckAsync(V("1.5.0"));
 
         Assert.True(check.UpdateAvailable);
-        Assert.Equal(SemVer.Parse("3.0.0"), check.Latest!.Version);
+        Assert.Equal(V("3.0.0"), check.Latest!.Version);
     }
 
     [Fact]
     public async Task Updater_ReleaseFilterExcludesPrereleases()
     {
         var source = new FakeSource(
-            new UpdateRelease(SemVer.Parse("2.0.0"), [new UpdateAsset("app", "stable")]),
-            new UpdateRelease(SemVer.Parse("3.0.0-rc.1"), [new UpdateAsset("app", "rc")], IsPrerelease: true));
+            new UpdateRelease(V("2.0.0"), [new UpdateAsset("app", "stable")]),
+            new UpdateRelease(V("3.0.0-rc.1"), [new UpdateAsset("app", "rc")], IsPrerelease: true));
 
         // Without a filter the prerelease is newest; with one it is skipped.
-        var all = await new Updater(source, Options()).CheckAsync(SemVer.Parse("1.0.0"));
-        Assert.Equal(SemVer.Parse("3.0.0-rc.1"), all.Latest!.Version);
+        var all = await new Updater(source, Options()).CheckAsync(V("1.0.0"));
+        Assert.Equal(V("3.0.0-rc.1"), all.Latest!.Version);
 
         var stableOnly = await new Updater(source, Options())
-            .CheckAsync(SemVer.Parse("1.0.0"), r => !r.IsPrerelease);
-        Assert.Equal(SemVer.Parse("2.0.0"), stableOnly.Latest!.Version);
+            .CheckAsync(V("1.0.0"), r => !r.IsPrerelease);
+        Assert.Equal(V("2.0.0"), stableOnly.Latest!.Version);
     }
 
     [Fact]
@@ -306,9 +230,9 @@ public class SelfUpdaterTests
     {
         // A newer release exists but ships nothing the selector accepts.
         var source = new FakeSource(new UpdateRelease(
-            SemVer.Parse("2.0.0"), [new UpdateAsset("win-x64", "loc")]));
+            V("2.0.0"), [new UpdateAsset("win-x64", "loc")]));
         var result = await new Updater(source, Options(allowNonSingleFile: true))
-            .UpdateAsync(SemVer.Parse("1.0.0"), a => a.Name == "osx-arm64");
+            .UpdateAsync(V("1.0.0"), a => a.Name == "osx-arm64");
         Assert.Equal(UpdateOutcome.NoAssetForPlatform, result.Outcome);
     }
 
@@ -316,9 +240,9 @@ public class SelfUpdaterTests
     public async Task Updater_UpToDateWhenNoNewerRelease()
     {
         var source = new FakeSource(new UpdateRelease(
-            SemVer.Parse("1.0.0"), [new UpdateAsset("osx-arm64", "loc")]));
+            V("1.0.0"), [new UpdateAsset("osx-arm64", "loc")]));
         var result = await new Updater(source, Options(allowNonSingleFile: true))
-            .UpdateAsync(SemVer.Parse("1.0.0"), a => a.Name == "osx-arm64");
+            .UpdateAsync(V("1.0.0"), a => a.Name == "osx-arm64");
         Assert.Equal(UpdateOutcome.UpToDate, result.Outcome);
     }
 
@@ -364,6 +288,8 @@ public class SelfUpdaterTests
 
     private static UpdateAsset Asset(UpdateRelease release, string name) =>
         release.Assets.Single(a => a.Name == name);
+
+    private static SemVersion V(string value) => SemVersion.Parse(value, SemVersionStyles.Any);
 
     private static UpdaterOptions Options(bool allowNonSingleFile = false) => new()
     {
@@ -420,14 +346,5 @@ public class SelfUpdaterTests
 
         public Task<Stream> OpenAssetAsync(UpdateAsset asset, CancellationToken ct = default) =>
             Task.FromResult<Stream>(new MemoryStream(Encoding.UTF8.GetBytes(_assetBody)));
-    }
-
-    private sealed class ThrowingSource : IUpdateSource
-    {
-        public Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(CancellationToken ct = default) =>
-            throw new HttpRequestException("backend down");
-
-        public Task<Stream> OpenAssetAsync(UpdateAsset asset, CancellationToken ct = default) =>
-            throw new HttpRequestException("backend down");
     }
 }

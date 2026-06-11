@@ -15,7 +15,7 @@ running image can't overwrite itself.
 dotnet add package SelfUpdater
 ```
 
-Targets `net8.0`, trim/AOT-compatible, serializes with [Serde.NET](https://github.com/serde-dotnet/serde).
+Targets `net10.0`, trim/AOT-compatible, serializes with [Serde.NET](https://github.com/serde-dotnet/serde).
 
 ## Where updates come from is pluggable
 
@@ -38,12 +38,10 @@ Backends in the box:
 
 | Source | Use it for |
 |---|---|
-| `HttpManifestUpdateSource` | A `releases.json` you publish yourself (CDN, Pages, blob store). Relative or absolute asset URLs. |
-| `DirectoryUpdateSource` | A local folder or network share — LAN/offline/air-gapped rollouts, and tests. |
+| `DirectoryUpdateSource` | A local folder or network share — LAN/offline/air-gapped rollouts, and tests. Lists the directory and infers releases from binary names (`{appName}-{version}-{rid}` by default; supply your own parser otherwise). Optional `{binary}.sha256` sidecars provide integrity. |
 | `GitHubReleaseUpdateSource` | GitHub Releases. Public repos need nothing; **private** repos take an `authToken` delegate and download through the authenticated asset API. |
-| `CompositeUpdateSource` | Several backends at once: queries all reachable ones and merges their releases, then routes the download back to the backend that produced the chosen asset. Free fallback + mirrors. |
 
-Implementing your own (S3, a package feed, a torrent, ...) is just those two methods.
+Need another backend? Implementing `IUpdateSource` yourself is just those two methods.
 
 ## Usage
 
@@ -53,10 +51,11 @@ file names or RIDs). It decides nothing about what is "new" unless you ask it to
 
 ```csharp
 using System.Runtime.InteropServices;
+using Semver;
 using SelfUpdater;
 using SelfUpdater.Sources;
 
-var source = new HttpManifestUpdateSource(new Uri("https://example.com/releases.json"));
+var source = new DirectoryUpdateSource("/path/to/releases", "myapp");
 
 var updater = new Updater(source, new UpdaterOptions
 {
@@ -65,12 +64,15 @@ var updater = new Updater(source, new UpdaterOptions
     // smoke test, or set e.g. ["--version"] if your binary exits 0 for those.
 });
 
-// You own the current version and the platform → asset mapping.
-SemVer current = SemVer.Parse(MyApp.Version);
+// You own the current version and the platform → asset mapping. Versions are
+// Semver.SemVersion (the Semver NuGet package).
+var current = SemVersion.Parse(MyApp.Version, SemVersionStyles.Any);
 var rid = RuntimeInformation.RuntimeIdentifier;
 
 // Convenience overload: newest-wins, you supply the asset selector.
-var result = await updater.UpdateAsync(current, asset => asset.Name == $"myapp-{rid}");
+// DirectoryUpdateSource names assets by their RID; other sources may use the
+// full file name — match whatever that source exposes as Name.
+var result = await updater.UpdateAsync(current, asset => asset.Name == rid);
 if (result.Outcome == UpdateOutcome.Staged)
     return 0; // a newer build was handed off; this process should now exit
 ```
@@ -91,11 +93,11 @@ the asset, then `ApplyAsync` a single asset:
 ```csharp
 var releases = await updater.GetReleasesAsync();
 var chosen = releases
-    .Where(r => r.Version > current && !r.IsPrerelease)
-    .OrderByDescending(r => r.Version)
+    .Where(r => r.Version.ComparePrecedenceTo(current) > 0 && !r.IsPrerelease)
+    .OrderByDescending(r => r.Version, SemVersion.PrecedenceComparer)
     .FirstOrDefault();
 
-var asset = chosen?.Assets.FirstOrDefault(a => a.Name == $"myapp-{rid}");
+var asset = chosen?.Assets.FirstOrDefault(a => a.Name == rid);
 if (asset is not null)
     await updater.ApplyAsync(asset);
 ```

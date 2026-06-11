@@ -1,3 +1,5 @@
+using Semver;
+
 namespace SelfUpdater;
 
 /// <summary>
@@ -19,7 +21,7 @@ public sealed record UpdateAsset(string Name, string Location, string? Sha256 = 
 /// flag, or a SemVer prerelease suffix). The engine never filters on this; it is
 /// surfaced so the consumer can choose to skip prereleases.
 /// </param>
-public sealed record UpdateRelease(SemVer Version, IReadOnlyList<UpdateAsset> Assets, bool IsPrerelease = false);
+public sealed record UpdateRelease(SemVersion Version, IReadOnlyList<UpdateAsset> Assets, bool IsPrerelease = false);
 
 /// <summary>
 /// Pluggable strategy for discovering and fetching new builds. This is the seam

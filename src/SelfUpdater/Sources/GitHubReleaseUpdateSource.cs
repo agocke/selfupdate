@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using Semver;
 using Serde;
 using Serde.Json;
 
@@ -101,7 +102,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
         {
             if (release.Draft == true)
                 continue;
-            if (SemVer.TryParse(release.TagName, out var version))
+            if (SemVersion.TryParse(release.TagName, SemVersionStyles.Any, out var version))
                 result.Add(new UpdateRelease(version, MapAssets(release), (release.Prerelease ?? false) || version.IsPrerelease));
         }
         return result;
