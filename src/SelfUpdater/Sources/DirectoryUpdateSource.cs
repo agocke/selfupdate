@@ -1,21 +1,12 @@
-using Semver;
-
 namespace SelfUpdater.Sources;
-
-/// <summary>
-/// Splits a release binary's file name into its version and platform identifier.
-/// The returned <c>Rid</c> becomes the asset's <see cref="Asset.Name"/>, which
-/// the consumer matches against its platform. Return <c>null</c> for files that are
-/// not release binaries (they are ignored).
-/// </summary>
-public delegate (SemVersion Version, string Rid)? AssetNameParser(string fileName);
 
 /// <summary>
 /// Update source backed by a local directory or network share. Rather than reading
 /// a manifest, it simply lists the directory and infers releases from the binary
 /// file names. The default naming convention is <c>{appName}-{version}-{rid}</c>
 /// (e.g. <c>myapp-1.2.3-osx-arm64</c>); supply a custom <see cref="AssetNameParser"/>
-/// to the constructor for any other scheme.
+/// to the constructor for any other scheme. Files whose names the parser rejects are
+/// ignored, so the directory may also hold checksums, notes, or unrelated files.
 /// <para>
 /// Integrity is optional and opt-in: if a sidecar file named
 /// <c>{binary}.sha256</c> sits next to a binary, its contents are used as that
@@ -46,7 +37,7 @@ public sealed class DirectoryUpdateSource : IUpdateSource
     public DirectoryUpdateSource(string directory, string appName, AssetNameParser? parse = null)
     {
         _directory = directory;
-        _parse = parse ?? DefaultParser(appName);
+        _parse = parse ?? AssetNaming.DefaultParser(appName);
     }
 
     public async Task<IReadOnlyList<Release>> GetReleasesAsync(CancellationToken ct = default)
@@ -54,7 +45,7 @@ public sealed class DirectoryUpdateSource : IUpdateSource
         if (!Directory.Exists(_directory))
             return [];
 
-        var byVersion = new Dictionary<SemVersion, List<Asset>>();
+        var candidates = new List<AssetNaming.Candidate>();
         foreach (var path in Directory.EnumerateFiles(_directory))
         {
             ct.ThrowIfCancellationRequested();
@@ -63,28 +54,20 @@ public sealed class DirectoryUpdateSource : IUpdateSource
             if (fileName.EndsWith(ChecksumExtension, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            if (_parse(fileName) is not { } parsed)
-                continue;
-
-            var (version, rid) = parsed;
             var sha256 = await ReadSidecarChecksumAsync(path, ct).ConfigureAwait(false);
-            var asset = new Asset(rid, path, sha256, new FileInfo(path).Length);
-
-            if (!byVersion.TryGetValue(version, out var assets))
-                byVersion[version] = assets = [];
-            assets.Add(asset);
+            candidates.Add(new(fileName, path, sha256, new FileInfo(path).Length));
         }
 
-        var releases = new List<Release>(byVersion.Count);
-        foreach (var (version, assets) in byVersion)
-            releases.Add(new Release(version, assets, version.IsPrerelease));
-        return releases;
+        return AssetNaming.ToReleases(candidates, _parse);
     }
 
     public Task<Stream> OpenAssetAsync(Asset asset, CancellationToken ct = default) =>
         Task.FromResult<Stream>(File.OpenRead(asset.Location));
 
-    private static async Task<string?> ReadSidecarChecksumAsync(string assetPath, CancellationToken ct)
+    private static async Task<string?> ReadSidecarChecksumAsync(
+        string assetPath,
+        CancellationToken ct
+    )
     {
         var sidecar = assetPath + ChecksumExtension;
         if (!File.Exists(sidecar))
@@ -97,24 +80,5 @@ public sealed class DirectoryUpdateSource : IUpdateSource
         // Accept a bare hash or the "<hash>  filename" sha256sum format.
         var space = text.IndexOfAny([' ', '\t']);
         return space > 0 ? text[..space] : text;
-    }
-
-    private static AssetNameParser DefaultParser(string appName)
-    {
-        var prefix = appName + "-";
-        return fileName =>
-        {
-            if (!fileName.StartsWith(prefix, StringComparison.Ordinal))
-                return null;
-
-            var rest = fileName[prefix.Length..];
-            var dash = rest.IndexOf('-');
-            if (dash <= 0 || dash == rest.Length - 1)
-                return null;
-
-            return SemVersion.TryParse(rest[..dash], SemVersionStyles.Any, out var version)
-                ? (version, rest[(dash + 1)..])
-                : null;
-        };
     }
 }

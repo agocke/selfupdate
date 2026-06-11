@@ -21,7 +21,11 @@ public sealed record Asset(string Name, string Location, string? Sha256 = null, 
 /// flag, or a SemVer prerelease suffix). The engine never filters on this; it is
 /// surfaced so the consumer can choose to skip prereleases.
 /// </param>
-public sealed record Release(SemVersion Version, IReadOnlyList<Asset> Assets, bool IsPrerelease = false);
+public sealed record Release(
+    SemVersion Version,
+    IReadOnlyList<Asset> Assets,
+    bool IsPrerelease = false
+);
 
 /// <summary>
 /// Pluggable strategy for discovering and fetching new builds. This is the seam

@@ -1,14 +1,15 @@
 using System.Net.Http.Headers;
-using Semver;
 using Serde;
 using Serde.Json;
 
 namespace SelfUpdater.Sources;
 
 /// <summary>
-/// Update source backed by the GitHub Releases API. Lists the repo's releases,
-/// parsing each <c>tag_name</c> as a version and exposing every asset of each
-/// release; the caller decides which release is newer than what it is running and
+/// Update source backed by the GitHub Releases API. Lists the repo's releases and
+/// infers releases from the asset file names, using the default
+/// <c>{appName}-{version}-{rid}</c> naming convention (or a custom
+/// <see cref="AssetNameParser"/>); assets that don't follow the convention are
+/// ignored. The caller decides which release is newer than what it is running and
 /// which asset matches its platform.
 /// <para>
 /// Draft releases are skipped (they are unpublished); prereleases are included and
@@ -38,11 +39,22 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
 
     private readonly string _owner;
     private readonly string _repo;
+    private readonly AssetNameParser _parse;
     private readonly Func<CancellationToken, Task<string?>>? _authToken;
     private readonly HttpClient _http;
 
     /// <param name="owner">Repository owner (user or org).</param>
     /// <param name="repo">Repository name.</param>
+    /// <param name="appName">
+    /// Application name for the default <c>{appName}-{version}-{rid}</c> asset-naming
+    /// convention. Each release asset's file name is parsed into a (version, rid);
+    /// assets that don't follow the convention are ignored. Pass <paramref name="parse"/>
+    /// for any other scheme.
+    /// </param>
+    /// <param name="parse">
+    /// Optional override for how asset names map to (version, rid). When omitted the
+    /// default <c>{appName}-{version}-{rid}</c> convention is used.
+    /// </param>
     /// <param name="authToken">
     /// Optional callback returning a bearer token for the GitHub API. Required for
     /// private repositories; omit for public ones. Awaited once per request so a
@@ -53,15 +65,21 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
     public GitHubReleaseUpdateSource(
         string owner,
         string repo,
+        string appName,
+        AssetNameParser? parse = null,
         Func<CancellationToken, Task<string?>>? authToken = null,
-        HttpClient? http = null)
+        HttpClient? http = null
+    )
     {
         _owner = owner;
         _repo = repo;
+        _parse = parse ?? AssetNaming.DefaultParser(appName);
         _authToken = authToken;
         _http = http ?? new HttpClient();
         if (!_http.DefaultRequestHeaders.UserAgent.Any())
-            _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("selfupdater", "1.0"));
+            _http.DefaultRequestHeaders.UserAgent.Add(
+                new ProductInfoHeaderValue("selfupdater", "1.0")
+            );
     }
 
     private bool IsPrivate => _authToken is not null;
@@ -97,28 +115,29 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
             return [];
         }
 
-        var result = new List<Release>(releases.Count);
+        var candidates = new List<AssetNaming.Candidate>();
         foreach (var release in releases)
         {
             if (release.Draft == true)
                 continue;
-            if (SemVersion.TryParse(release.TagName, SemVersionStyles.Any, out var version))
-                result.Add(new Release(version, MapAssets(release), (release.Prerelease ?? false) || version.IsPrerelease));
+            foreach (var a in release.Assets)
+            {
+                // For private repos download through the authenticated asset API
+                // endpoint; for public repos the browser URL needs no credentials.
+                var location = IsPrivate ? (a.Url ?? a.BrowserDownloadUrl) : a.BrowserDownloadUrl;
+                candidates.Add(
+                    new(
+                        a.Name,
+                        location,
+                        ParseDigest(a.Digest),
+                        a.Size,
+                        release.Prerelease ?? false
+                    )
+                );
+            }
         }
-        return result;
-    }
 
-    private IReadOnlyList<Asset> MapAssets(GitHubRelease release)
-    {
-        var assets = new List<Asset>(release.Assets.Count);
-        foreach (var a in release.Assets)
-        {
-            // For private repos download through the authenticated asset API
-            // endpoint; for public repos the browser URL needs no credentials.
-            var location = IsPrivate ? (a.Url ?? a.BrowserDownloadUrl) : a.BrowserDownloadUrl;
-            assets.Add(new Asset(a.Name, location, ParseDigest(a.Digest), a.Size));
-        }
-        return assets;
+        return AssetNaming.ToReleases(candidates, _parse);
     }
 
     /// <summary>GitHub reports asset digests as "&lt;algo&gt;:&lt;hex&gt;"; we use the SHA-256 hex.</summary>
@@ -141,7 +160,9 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/octet-stream"));
         await AddAuthAsync(req, ct).ConfigureAwait(false);
 
-        var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        var resp = await _http
+            .SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct)
+            .ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
         return await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
     }
@@ -156,7 +177,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
 }
 
 [GenerateSerde]
-public sealed partial record GitHubRelease
+internal sealed partial record GitHubRelease
 {
     [SerdeMemberOptions(Rename = "tag_name")]
     public required string TagName { get; init; }
@@ -169,7 +190,7 @@ public sealed partial record GitHubRelease
 }
 
 [GenerateSerde]
-public sealed partial record GitHubAsset
+internal sealed partial record GitHubAsset
 {
     public required string Name { get; init; }
 

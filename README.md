@@ -39,7 +39,7 @@ Backends in the box:
 | Source | Use it for |
 |---|---|
 | `DirectoryUpdateSource` | A local folder or network share — LAN/offline/air-gapped rollouts, and tests. Lists the directory and infers releases from binary names (`{appName}-{version}-{rid}` by default; supply your own parser otherwise). Optional `{binary}.sha256` sidecars provide integrity. |
-| `GitHubReleaseUpdateSource` | GitHub Releases. Public repos need nothing; **private** repos take an `authToken` delegate and download through the authenticated asset API. |
+| `GitHubReleaseUpdateSource` | GitHub Releases. Infers releases from asset names (`{appName}-{version}-{rid}` by default; supply your own parser otherwise) — assets that don't match are ignored. Public repos need nothing; **private** repos take an `authToken` delegate and download through the authenticated asset API. |
 
 Need another backend? Implementing `IUpdateSource` yourself is just those two methods.
 
@@ -70,8 +70,8 @@ var current = SemVersion.Parse(MyApp.Version, SemVersionStyles.Any);
 var rid = RuntimeInformation.RuntimeIdentifier;
 
 // Convenience overload: newest-wins, you supply the asset selector.
-// DirectoryUpdateSource names assets by their RID; other sources may use the
-// full file name — match whatever that source exposes as Name.
+// Every source names assets by their RID (parsed from the `{appName}-{version}-{rid}`
+// convention, or your custom parser), so match against the RID you want.
 var result = await updater.UpdateAsync(current, asset => asset.Name == rid);
 if (result.Outcome == UpdateOutcome.Staged)
     return 0; // a newer build was handed off; this process should now exit
@@ -126,13 +126,18 @@ fetch/cache/refresh short-lived or rotating tokens however it likes:
 
 ```csharp
 var gh = new GitHubReleaseUpdateSource(
-    owner: "you", repo: "private-app",
+    owner: "you", repo: "private-app", appName: "private-app",
     authToken: ct => TokenCache.GetCurrentInstallationTokenAsync(ct)); // your concern
 ```
 
 Use a fine-grained PAT (`Contents: read-only`), a GitHub App installation token
 vended from a small endpoint, or an OAuth device-flow token — the library doesn't
 care which.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build/test steps and the CSharpier
+formatting requirement.
 
 ## License
 

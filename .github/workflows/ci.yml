@@ -20,6 +20,9 @@ jobs:
       - name: Restore
         run: dotnet restore SelfUpdater.slnx
 
+      - name: Check formatting
+        run: dotnet tool restore && dotnet csharpier check .
+
       - name: Build
         run: dotnet build SelfUpdater.slnx -c Release --no-restore
 

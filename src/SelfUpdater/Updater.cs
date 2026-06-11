@@ -10,17 +10,25 @@ public enum UpdateOutcome
 {
     /// <summary>Already on the latest version (or newer).</summary>
     UpToDate,
+
     /// <summary>A newer build was downloaded, validated, and handed off; the caller should now exit.</summary>
     Staged,
+
     /// <summary>A newer version exists but the source had no asset for this RID.</summary>
     NoAssetForPlatform,
+
     /// <summary>The running process is not a self-contained single file, so it cannot replace itself.</summary>
     NotSelfContained,
+
     /// <summary>The update could not be completed (network, checksum, validation, ...).</summary>
     Failed,
 }
 
-public sealed record UpdateResult(UpdateOutcome Outcome, SemVersion? Version = null, string? Message = null);
+public sealed record UpdateResult(
+    UpdateOutcome Outcome,
+    SemVersion? Version = null,
+    string? Message = null
+);
 
 public sealed class UpdaterOptions
 {
@@ -100,11 +108,17 @@ public sealed class Updater
     public Task<UpdateResult> ApplyAsync(Asset asset, CancellationToken ct = default) =>
         ApplyAssetAsync(asset, version: null, ct);
 
-    private async Task<UpdateResult> ApplyAssetAsync(Asset asset, SemVersion? version, CancellationToken ct)
+    private async Task<UpdateResult> ApplyAssetAsync(
+        Asset asset,
+        SemVersion? version,
+        CancellationToken ct
+    )
     {
         if (!_options.AllowNonSingleFile && !Utilities.IsSingleFile())
         {
-            _log.WriteLine("Cannot self-update: not deployed as a single file (e.g. running via 'dotnet run').");
+            _log.WriteLine(
+                "Cannot self-update: not deployed as a single file (e.g. running via 'dotnet run')."
+            );
             return new UpdateResult(UpdateOutcome.NotSelfContained, version);
         }
 
@@ -117,10 +131,18 @@ public sealed class Updater
 
         var staged = await DownloadAndValidateAsync(asset, target, ct).ConfigureAwait(false);
         if (staged is null)
-            return new UpdateResult(UpdateOutcome.Failed, version, "Download or validation failed.");
+            return new UpdateResult(
+                UpdateOutcome.Failed,
+                version,
+                "Download or validation failed."
+            );
 
         if (!LaunchHandoff(staged, target))
-            return new UpdateResult(UpdateOutcome.Failed, version, "Could not launch the handoff process.");
+            return new UpdateResult(
+                UpdateOutcome.Failed,
+                version,
+                "Could not launch the handoff process."
+            );
 
         return new UpdateResult(UpdateOutcome.Staged, version);
     }
@@ -134,7 +156,8 @@ public sealed class Updater
     public async Task<UpdateCheck> CheckAsync(
         SemVersion currentVersion,
         Func<Release, bool>? releaseFilter = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default
+    )
     {
         _log.WriteLine($"Checking for updates (current {currentVersion})...");
         var releases = await GetReleasesAsync(ct).ConfigureAwait(false);
@@ -146,7 +169,11 @@ public sealed class Updater
         }
 
         var available = newest.Version.ComparePrecedenceTo(currentVersion) > 0;
-        _log.WriteLine(available ? $"Update available: {newest.Version}" : $"Up to date (latest {newest.Version}).");
+        _log.WriteLine(
+            available
+                ? $"Update available: {newest.Version}"
+                : $"Up to date (latest {newest.Version})."
+        );
         return new UpdateCheck(available, currentVersion, newest);
     }
 
@@ -162,7 +189,8 @@ public sealed class Updater
         SemVersion currentVersion,
         Func<Asset, bool> assetSelector,
         Func<Release, bool>? releaseFilter = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default
+    )
     {
         var releases = await GetReleasesAsync(ct).ConfigureAwait(false);
         var newest = Newest(releases, releaseFilter);
@@ -181,7 +209,11 @@ public sealed class Updater
         if (asset is null)
         {
             _log.WriteLine($"No matching asset in release {newest.Version} for this platform.");
-            return new UpdateResult(UpdateOutcome.NoAssetForPlatform, newest.Version, "No matching asset.");
+            return new UpdateResult(
+                UpdateOutcome.NoAssetForPlatform,
+                newest.Version,
+                "No matching asset."
+            );
         }
 
         return await ApplyAssetAsync(asset, newest.Version, ct).ConfigureAwait(false);
@@ -201,7 +233,11 @@ public sealed class Updater
         return best;
     }
 
-    private async Task<string?> DownloadAndValidateAsync(Asset asset, string target, CancellationToken ct)
+    private async Task<string?> DownloadAndValidateAsync(
+        Asset asset,
+        string target,
+        CancellationToken ct
+    )
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "selfupdater-" + Path.GetRandomFileName());
         Directory.CreateDirectory(tempDir);
@@ -212,7 +248,12 @@ public sealed class Updater
         try
         {
             await using var src = await _source.OpenAssetAsync(asset, ct).ConfigureAwait(false);
-            await using var file = new FileStream(staged, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            await using var file = new FileStream(
+                staged,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None
+            );
             await src.CopyToAsync(file, ct).ConfigureAwait(false);
         }
         catch (Exception e) when (e is not OperationCanceledException)
@@ -286,7 +327,14 @@ public sealed class Updater
         var psi = new ProcessStartInfo
         {
             FileName = stagedPath,
-            ArgumentList = { HandoffVerb, DestOption, target, PidOption, Environment.ProcessId.ToString() },
+            ArgumentList =
+            {
+                HandoffVerb,
+                DestOption,
+                target,
+                PidOption,
+                Environment.ProcessId.ToString(),
+            },
         };
         if (_options.Relaunch)
             psi.ArgumentList.Add(RelaunchOption);
@@ -303,7 +351,8 @@ public sealed class Updater
         string destPath,
         int oldPid,
         IReadOnlyList<string>? relaunchArgs = null,
-        TextWriter? log = null)
+        TextWriter? log = null
+    )
     {
         log ??= Console.Out;
 
@@ -344,8 +393,13 @@ public sealed class Updater
 
             if (File.Exists(backup))
             {
-                try { File.Delete(backup); }
-                catch { /* a locked .bak on Windows is harmless; leave it for next run */ }
+                try
+                {
+                    File.Delete(backup);
+                }
+                catch
+                { /* a locked .bak on Windows is harmless; leave it for next run */
+                }
             }
         }
         catch (Exception e)
@@ -353,7 +407,13 @@ public sealed class Updater
             log.WriteLine($"Swap failed: {e.Message}");
             if (File.Exists(backup) && !File.Exists(destPath))
             {
-                try { File.Move(backup, destPath); } catch { /* best effort */ }
+                try
+                {
+                    File.Move(backup, destPath);
+                }
+                catch
+                { /* best effort */
+                }
             }
             return 1;
         }

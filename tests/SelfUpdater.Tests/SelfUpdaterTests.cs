@@ -1,9 +1,8 @@
 using System.Net;
 using System.Text;
-
-using Semver;
 using SelfUpdater;
 using SelfUpdater.Sources;
+using Semver;
 
 namespace SelfUpdater.Tests;
 
@@ -49,53 +48,54 @@ public class SelfUpdaterTests
     public async Task GitHubSource_ListsReleasesWithAllAssets()
     {
         const string json = """
-        [
-          {
-            "tag_name": "v0.3.0",
-            "html_url": "https://github.com/agocke/app/releases/tag/v0.3.0",
-            "assets": [
-              { "name": "app-osx-arm64", "browser_download_url": "https://dl/osx-030", "size": 42,
-                "digest": "sha256:DEADBEEF" },
-              { "name": "app-linux-x64", "browser_download_url": "https://dl/linux-030" }
+            [
+              {
+                "tag_name": "v0.3.0",
+                "html_url": "https://github.com/agocke/app/releases/tag/v0.3.0",
+                "assets": [
+                  { "name": "app-0.3.0-osx-arm64", "browser_download_url": "https://dl/osx-030", "size": 42,
+                    "digest": "sha256:DEADBEEF" },
+                  { "name": "app-0.3.0-linux-x64", "browser_download_url": "https://dl/linux-030" }
+                ]
+              },
+              {
+                "tag_name": "v0.2.0",
+                "assets": [
+                  { "name": "app-0.2.0-osx-arm64", "browser_download_url": "https://dl/osx-020" }
+                ]
+              }
             ]
-          },
-          {
-            "tag_name": "v0.2.0",
-            "assets": [
-              { "name": "app-osx-arm64", "browser_download_url": "https://dl/osx-020" }
-            ]
-          }
-        ]
-        """;
-        var source = new GitHubReleaseUpdateSource("agocke", "app", http: StubClient(json));
+            """;
+        var source = new GitHubReleaseUpdateSource("agocke", "app", "app", http: StubClient(json));
 
         var releases = await source.GetReleasesAsync();
 
         Assert.Equal(2, releases.Count);
-        Assert.Equal(V("0.3.0"), releases[0].Version);
-        Assert.Equal(2, releases[0].Assets.Count);
-        var osx = FindAsset(releases[0], "app-osx-arm64");
+        var v030 = releases.Single(r => r.Version == V("0.3.0"));
+        Assert.Equal(2, v030.Assets.Count);
+        // The asset Name is the rid parsed out of the file name.
+        var osx = FindAsset(v030, "osx-arm64");
         Assert.Equal("https://dl/osx-030", osx.Location);
         Assert.Equal(42, osx.Size);
         // GitHub's published digest becomes the integrity hash.
         Assert.Equal("DEADBEEF", osx.Sha256);
-        Assert.Null(FindAsset(releases[0], "app-linux-x64").Sha256);
+        Assert.Null(FindAsset(v030, "linux-x64").Sha256);
     }
 
     [Fact]
     public async Task GitHubSource_SkipsDraftsAndFlagsPrereleases()
     {
         const string json = """
-        [
-          { "tag_name": "v0.4.0", "draft": true,
-            "assets": [ { "name": "a", "browser_download_url": "https://dl/draft" } ] },
-          { "tag_name": "v0.3.0", "prerelease": true,
-            "assets": [ { "name": "a", "browser_download_url": "https://dl/pre" } ] },
-          { "tag_name": "v0.2.0",
-            "assets": [ { "name": "a", "browser_download_url": "https://dl/rel" } ] }
-        ]
-        """;
-        var source = new GitHubReleaseUpdateSource("agocke", "app", http: StubClient(json));
+            [
+              { "tag_name": "v0.4.0", "draft": true,
+                "assets": [ { "name": "app-0.4.0-osx-arm64", "browser_download_url": "https://dl/draft" } ] },
+              { "tag_name": "v0.3.0", "prerelease": true,
+                "assets": [ { "name": "app-0.3.0-osx-arm64", "browser_download_url": "https://dl/pre" } ] },
+              { "tag_name": "v0.2.0",
+                "assets": [ { "name": "app-0.2.0-osx-arm64", "browser_download_url": "https://dl/rel" } ] }
+            ]
+            """;
+        var source = new GitHubReleaseUpdateSource("agocke", "app", "app", http: StubClient(json));
 
         var releases = await source.GetReleasesAsync();
 
@@ -115,7 +115,10 @@ public class SelfUpdaterTests
             File.WriteAllText(Path.Combine(dir, "myapp-1.5.0-osx-arm64"), "the-binary-bytes");
             File.WriteAllText(Path.Combine(dir, "myapp-1.5.0-linux-x64"), "linux-bytes");
             // Sidecar checksum (sha256sum format) is picked up for the osx binary only.
-            File.WriteAllText(Path.Combine(dir, "myapp-1.5.0-osx-arm64.sha256"), "abc123  myapp-1.5.0-osx-arm64\n");
+            File.WriteAllText(
+                Path.Combine(dir, "myapp-1.5.0-osx-arm64.sha256"),
+                "abc123  myapp-1.5.0-osx-arm64\n"
+            );
             // Unrelated files are ignored.
             File.WriteAllText(Path.Combine(dir, "notes.txt"), "ignore me");
 
@@ -151,14 +154,20 @@ public class SelfUpdaterTests
             File.WriteAllText(Path.Combine(dir, "myapp-3.0.0-rc.1-osx-arm64"), "rc");
 
             // Custom parser handles the prerelease tag the default convention can't split.
-            var source = new DirectoryUpdateSource(dir, "myapp", fileName =>
-            {
-                const string prefix = "myapp-";
-                if (!fileName.StartsWith(prefix) || !fileName.EndsWith("-osx-arm64"))
-                    return null;
-                var version = fileName[prefix.Length..^"-osx-arm64".Length];
-                return SemVersion.TryParse(version, SemVersionStyles.Any, out var v) ? (v, "osx-arm64") : null;
-            });
+            var source = new DirectoryUpdateSource(
+                dir,
+                "myapp",
+                fileName =>
+                {
+                    const string prefix = "myapp-";
+                    if (!fileName.StartsWith(prefix) || !fileName.EndsWith("-osx-arm64"))
+                        return null;
+                    var version = fileName[prefix.Length..^"-osx-arm64".Length];
+                    return SemVersion.TryParse(version, SemVersionStyles.Any, out var v)
+                        ? (v, "osx-arm64")
+                        : null;
+                }
+            );
 
             var releases = await source.GetReleasesAsync();
 
@@ -175,7 +184,10 @@ public class SelfUpdaterTests
     [Fact]
     public async Task DirectorySource_MissingDirectoryReturnsEmpty()
     {
-        var dir = Path.Combine(Path.GetTempPath(), "selfupdater-missing-" + Path.GetRandomFileName());
+        var dir = Path.Combine(
+            Path.GetTempPath(),
+            "selfupdater-missing-" + Path.GetRandomFileName()
+        );
         var source = new DirectoryUpdateSource(dir, "myapp");
         Assert.Empty(await source.GetReleasesAsync());
     }
@@ -183,14 +195,12 @@ public class SelfUpdaterTests
     [Fact]
     public async Task Updater_DetectsAvailableAndUpToDate()
     {
-        var newer = new FakeSource(new Release(
-            V("9.9.9"), [new Asset("app", "https://dl")]));
+        var newer = new FakeSource(new Release(V("9.9.9"), [new Asset("app", "https://dl")]));
         var available = await new Updater(newer, Options()).CheckAsync(V("1.0.0"));
         Assert.True(available.UpdateAvailable);
         Assert.Equal(V("9.9.9"), available.Latest!.Version);
 
-        var same = new FakeSource(new Release(
-            V("1.0.0"), [new Asset("app", "https://dl")]));
+        var same = new FakeSource(new Release(V("1.0.0"), [new Asset("app", "https://dl")]));
         var upToDate = await new Updater(same, Options()).CheckAsync(V("1.0.0"));
         Assert.False(upToDate.UpdateAvailable);
     }
@@ -201,7 +211,8 @@ public class SelfUpdaterTests
         var source = new FakeSource(
             new Release(V("1.0.0"), [new Asset("app", "v1")]),
             new Release(V("3.0.0"), [new Asset("app", "v3")]),
-            new Release(V("2.0.0"), [new Asset("app", "v2")]));
+            new Release(V("2.0.0"), [new Asset("app", "v2")])
+        );
 
         var check = await new Updater(source, Options()).CheckAsync(V("1.5.0"));
 
@@ -214,14 +225,17 @@ public class SelfUpdaterTests
     {
         var source = new FakeSource(
             new Release(V("2.0.0"), [new Asset("app", "stable")]),
-            new Release(V("3.0.0-rc.1"), [new Asset("app", "rc")], IsPrerelease: true));
+            new Release(V("3.0.0-rc.1"), [new Asset("app", "rc")], IsPrerelease: true)
+        );
 
         // Without a filter the prerelease is newest; with one it is skipped.
         var all = await new Updater(source, Options()).CheckAsync(V("1.0.0"));
         Assert.Equal(V("3.0.0-rc.1"), all.Latest!.Version);
 
-        var stableOnly = await new Updater(source, Options())
-            .CheckAsync(V("1.0.0"), r => !r.IsPrerelease);
+        var stableOnly = await new Updater(source, Options()).CheckAsync(
+            V("1.0.0"),
+            r => !r.IsPrerelease
+        );
         Assert.Equal(V("2.0.0"), stableOnly.Latest!.Version);
     }
 
@@ -229,20 +243,22 @@ public class SelfUpdaterTests
     public async Task Updater_ReportsNoAssetForPlatform()
     {
         // A newer release exists but ships nothing the selector accepts.
-        var source = new FakeSource(new Release(
-            V("2.0.0"), [new Asset("win-x64", "loc")]));
-        var result = await new Updater(source, Options(allowNonSingleFile: true))
-            .UpdateAsync(V("1.0.0"), a => a.Name == "osx-arm64");
+        var source = new FakeSource(new Release(V("2.0.0"), [new Asset("win-x64", "loc")]));
+        var result = await new Updater(source, Options(allowNonSingleFile: true)).UpdateAsync(
+            V("1.0.0"),
+            a => a.Name == "osx-arm64"
+        );
         Assert.Equal(UpdateOutcome.NoAssetForPlatform, result.Outcome);
     }
 
     [Fact]
     public async Task Updater_UpToDateWhenNoNewerRelease()
     {
-        var source = new FakeSource(new Release(
-            V("1.0.0"), [new Asset("osx-arm64", "loc")]));
-        var result = await new Updater(source, Options(allowNonSingleFile: true))
-            .UpdateAsync(V("1.0.0"), a => a.Name == "osx-arm64");
+        var source = new FakeSource(new Release(V("1.0.0"), [new Asset("osx-arm64", "loc")]));
+        var result = await new Updater(source, Options(allowNonSingleFile: true)).UpdateAsync(
+            V("1.0.0"),
+            a => a.Name == "osx-arm64"
+        );
         Assert.Equal(UpdateOutcome.UpToDate, result.Outcome);
     }
 
@@ -250,32 +266,40 @@ public class SelfUpdaterTests
     public async Task GitHubSource_PrivateRepoUsesAuthAndAssetApiUrl()
     {
         const string json = """
-        [
-          {
-            "tag_name": "v0.3.0",
-            "assets": [
+            [
               {
-                "name": "app-osx-arm64",
-                "url": "https://api.github.com/repos/agocke/app/releases/assets/99",
-                "browser_download_url": "https://dl/osx",
-                "size": 42
+                "tag_name": "v0.3.0",
+                "assets": [
+                  {
+                    "name": "app-0.3.0-osx-arm64",
+                    "url": "https://api.github.com/repos/agocke/app/releases/assets/99",
+                    "browser_download_url": "https://dl/osx",
+                    "size": 42
+                  }
+                ]
               }
             ]
-          }
-        ]
-        """;
+            """;
         string? seenAuth = null;
         string? seenAccept = null;
-        var handler = new CapturingHandler(json, req =>
-        {
-            seenAuth = req.Headers.Authorization?.ToString();
-            seenAccept = req.Headers.Accept.ToString();
-        });
+        var handler = new CapturingHandler(
+            json,
+            req =>
+            {
+                seenAuth = req.Headers.Authorization?.ToString();
+                seenAccept = req.Headers.Accept.ToString();
+            }
+        );
         var source = new GitHubReleaseUpdateSource(
-            "agocke", "app", authToken: _ => Task.FromResult<string?>("tok-123"), http: new HttpClient(handler));
+            "agocke",
+            "app",
+            "app",
+            authToken: _ => Task.FromResult<string?>("tok-123"),
+            http: new HttpClient(handler)
+        );
 
         var release = Assert.Single(await source.GetReleasesAsync());
-        var asset = FindAsset(release, "app-osx-arm64");
+        var asset = FindAsset(release, "osx-arm64");
 
         // Private repos download via the asset API url, not browser_download_url.
         Assert.Equal("https://api.github.com/repos/agocke/app/releases/assets/99", asset.Location);
@@ -291,36 +315,45 @@ public class SelfUpdaterTests
 
     private static SemVersion V(string value) => SemVersion.Parse(value, SemVersionStyles.Any);
 
-    private static UpdaterOptions Options(bool allowNonSingleFile = false) => new()
-    {
-        Relaunch = false,
-        AllowNonSingleFile = allowNonSingleFile,
-        Log = TextWriter.Null,
-    };
+    private static UpdaterOptions Options(bool allowNonSingleFile = false) =>
+        new()
+        {
+            Relaunch = false,
+            AllowNonSingleFile = allowNonSingleFile,
+            Log = TextWriter.Null,
+        };
 
-    private static HttpClient StubClient(string body) =>
-        new(new StubHandler(body));
+    private static HttpClient StubClient(string body) => new(new StubHandler(body));
 
     private sealed class StubHandler(string body) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request, CancellationToken cancellationToken) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(body, Encoding.UTF8, "application/json"),
-            });
+            HttpRequestMessage request,
+            CancellationToken cancellationToken
+        ) =>
+            Task.FromResult(
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(body, Encoding.UTF8, "application/json"),
+                }
+            );
     }
 
-    private sealed class CapturingHandler(string body, Action<HttpRequestMessage> capture) : HttpMessageHandler
+    private sealed class CapturingHandler(string body, Action<HttpRequestMessage> capture)
+        : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request, CancellationToken cancellationToken)
+            HttpRequestMessage request,
+            CancellationToken cancellationToken
+        )
         {
             capture(request);
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(body, Encoding.UTF8, "application/json"),
-            });
+            return Task.FromResult(
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(body, Encoding.UTF8, "application/json"),
+                }
+            );
         }
     }
 
