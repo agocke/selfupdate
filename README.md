@@ -24,8 +24,8 @@ Everything hangs off one seam, `IUpdateSource`:
 ```csharp
 public interface IUpdateSource
 {
-    Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(CancellationToken ct = default);
-    Task<Stream> OpenAssetAsync(UpdateAsset asset, CancellationToken ct = default);
+    Task<IReadOnlyList<Release>> GetReleasesAsync(CancellationToken ct = default);
+    Task<Stream> OpenAssetAsync(Asset asset, CancellationToken ct = default);
 }
 ```
 

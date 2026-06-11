@@ -4,7 +4,7 @@ namespace SelfUpdater.Sources;
 
 /// <summary>
 /// Splits a release binary's file name into its version and platform identifier.
-/// The returned <c>Rid</c> becomes the asset's <see cref="UpdateAsset.Name"/>, which
+/// The returned <c>Rid</c> becomes the asset's <see cref="Asset.Name"/>, which
 /// the consumer matches against its platform. Return <c>null</c> for files that are
 /// not release binaries (they are ignored).
 /// </summary>
@@ -19,7 +19,7 @@ public delegate (SemVersion Version, string Rid)? AssetNameParser(string fileNam
 /// <para>
 /// Integrity is optional and opt-in: if a sidecar file named
 /// <c>{binary}.sha256</c> sits next to a binary, its contents are used as that
-/// asset's <see cref="UpdateAsset.Sha256"/> (a bare hash, or the leading
+/// asset's <see cref="Asset.Sha256"/> (a bare hash, or the leading
 /// <c>sha256sum</c>-style <c>&lt;hash&gt;&#160;&#160;filename</c> token).
 /// </para>
 /// Useful for LAN/offline distribution, air-gapped rollouts, and tests — no HTTP
@@ -49,12 +49,12 @@ public sealed class DirectoryUpdateSource : IUpdateSource
         _parse = parse ?? DefaultParser(appName);
     }
 
-    public async Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<Release>> GetReleasesAsync(CancellationToken ct = default)
     {
         if (!Directory.Exists(_directory))
             return [];
 
-        var byVersion = new Dictionary<SemVersion, List<UpdateAsset>>();
+        var byVersion = new Dictionary<SemVersion, List<Asset>>();
         foreach (var path in Directory.EnumerateFiles(_directory))
         {
             ct.ThrowIfCancellationRequested();
@@ -68,20 +68,20 @@ public sealed class DirectoryUpdateSource : IUpdateSource
 
             var (version, rid) = parsed;
             var sha256 = await ReadSidecarChecksumAsync(path, ct).ConfigureAwait(false);
-            var asset = new UpdateAsset(rid, path, sha256, new FileInfo(path).Length);
+            var asset = new Asset(rid, path, sha256, new FileInfo(path).Length);
 
             if (!byVersion.TryGetValue(version, out var assets))
                 byVersion[version] = assets = [];
             assets.Add(asset);
         }
 
-        var releases = new List<UpdateRelease>(byVersion.Count);
+        var releases = new List<Release>(byVersion.Count);
         foreach (var (version, assets) in byVersion)
-            releases.Add(new UpdateRelease(version, assets, version.IsPrerelease));
+            releases.Add(new Release(version, assets, version.IsPrerelease));
         return releases;
     }
 
-    public Task<Stream> OpenAssetAsync(UpdateAsset asset, CancellationToken ct = default) =>
+    public Task<Stream> OpenAssetAsync(Asset asset, CancellationToken ct = default) =>
         Task.FromResult<Stream>(File.OpenRead(asset.Location));
 
     private static async Task<string?> ReadSidecarChecksumAsync(string assetPath, CancellationToken ct)

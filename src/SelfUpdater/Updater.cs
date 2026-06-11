@@ -4,7 +4,7 @@ using Semver;
 namespace SelfUpdater;
 
 /// <summary>Result of comparing the running build against a source's releases.</summary>
-public sealed record UpdateCheck(bool UpdateAvailable, SemVersion Current, UpdateRelease? Latest);
+public sealed record UpdateCheck(bool UpdateAvailable, SemVersion Current, Release? Latest);
 
 public enum UpdateOutcome
 {
@@ -56,7 +56,7 @@ public sealed class UpdaterOptions
 /// caller's current version, never decides what counts as "new", and never picks
 /// which asset suits the running platform. The caller owns its version, the version
 /// comparison, and asset selection. Use <see cref="GetReleasesAsync"/> +
-/// <see cref="ApplyAsync(UpdateAsset, CancellationToken)"/> for full control, or the
+/// <see cref="ApplyAsync(Asset, CancellationToken)"/> for full control, or the
 /// <see cref="UpdateAsync"/> / <see cref="CheckAsync"/> convenience overloads (which
 /// take the caller's current version plus an asset selector and apply the common
 /// "newest wins" policy) for the simple case.
@@ -88,7 +88,7 @@ public sealed class Updater
     /// current version to decide whether any are new, and selects the asset matching
     /// its platform; this method applies no policy of its own.
     /// </summary>
-    public Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(CancellationToken ct = default) =>
+    public Task<IReadOnlyList<Release>> GetReleasesAsync(CancellationToken ct = default) =>
         _source.GetReleasesAsync(ct);
 
     /// <summary>
@@ -97,10 +97,10 @@ public sealed class Updater
     /// selection — it applies exactly the asset it is given. The caller is
     /// responsible for having decided this asset is the right, newer build.
     /// </summary>
-    public Task<UpdateResult> ApplyAsync(UpdateAsset asset, CancellationToken ct = default) =>
+    public Task<UpdateResult> ApplyAsync(Asset asset, CancellationToken ct = default) =>
         ApplyAssetAsync(asset, version: null, ct);
 
-    private async Task<UpdateResult> ApplyAssetAsync(UpdateAsset asset, SemVersion? version, CancellationToken ct)
+    private async Task<UpdateResult> ApplyAssetAsync(Asset asset, SemVersion? version, CancellationToken ct)
     {
         if (!_options.AllowNonSingleFile && !Utilities.IsSingleFile())
         {
@@ -133,7 +133,7 @@ public sealed class Updater
     /// </summary>
     public async Task<UpdateCheck> CheckAsync(
         SemVersion currentVersion,
-        Func<UpdateRelease, bool>? releaseFilter = null,
+        Func<Release, bool>? releaseFilter = null,
         CancellationToken ct = default)
     {
         _log.WriteLine($"Checking for updates (current {currentVersion})...");
@@ -151,7 +151,7 @@ public sealed class Updater
     }
 
     /// <summary>
-    /// Convenience over <see cref="GetReleasesAsync"/> + <see cref="ApplyAsync(UpdateAsset, CancellationToken)"/>:
+    /// Convenience over <see cref="GetReleasesAsync"/> + <see cref="ApplyAsync(Asset, CancellationToken)"/>:
     /// pick the newest release (optionally restricted by <paramref name="releaseFilter"/>);
     /// if it is newer than <paramref name="currentVersion"/>, select its asset with
     /// <paramref name="assetSelector"/> and apply it, otherwise report
@@ -160,8 +160,8 @@ public sealed class Updater
     /// </summary>
     public async Task<UpdateResult> UpdateAsync(
         SemVersion currentVersion,
-        Func<UpdateAsset, bool> assetSelector,
-        Func<UpdateRelease, bool>? releaseFilter = null,
+        Func<Asset, bool> assetSelector,
+        Func<Release, bool>? releaseFilter = null,
         CancellationToken ct = default)
     {
         var releases = await GetReleasesAsync(ct).ConfigureAwait(false);
@@ -169,7 +169,7 @@ public sealed class Updater
         if (newest is null || newest.Version.ComparePrecedenceTo(currentVersion) <= 0)
             return new UpdateResult(UpdateOutcome.UpToDate, newest?.Version);
 
-        UpdateAsset? asset = null;
+        Asset? asset = null;
         foreach (var candidate in newest.Assets)
         {
             if (assetSelector(candidate))
@@ -188,9 +188,9 @@ public sealed class Updater
     }
 
     /// <summary>Pick the highest-version release, after applying an optional filter.</summary>
-    private static UpdateRelease? Newest(IReadOnlyList<UpdateRelease> releases, Func<UpdateRelease, bool>? filter)
+    private static Release? Newest(IReadOnlyList<Release> releases, Func<Release, bool>? filter)
     {
-        UpdateRelease? best = null;
+        Release? best = null;
         foreach (var release in releases)
         {
             if (filter is not null && !filter(release))
@@ -201,7 +201,7 @@ public sealed class Updater
         return best;
     }
 
-    private async Task<string?> DownloadAndValidateAsync(UpdateAsset asset, string target, CancellationToken ct)
+    private async Task<string?> DownloadAndValidateAsync(Asset asset, string target, CancellationToken ct)
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "selfupdater-" + Path.GetRandomFileName());
         Directory.CreateDirectory(tempDir);

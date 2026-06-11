@@ -12,13 +12,13 @@ namespace SelfUpdater.Sources;
 /// which asset matches its platform.
 /// <para>
 /// Draft releases are skipped (they are unpublished); prereleases are included and
-/// flagged via <see cref="UpdateRelease.IsPrerelease"/> so the caller can filter
+/// flagged via <see cref="Release.IsPrerelease"/> so the caller can filter
 /// them. Only the first page of releases (the most recent ~30) is returned, which
 /// is sufficient for "is there anything newer than me" decisions.
 /// </para>
 /// <para>
 /// When GitHub reports an asset <c>digest</c> (e.g. <c>sha256:…</c>) it is surfaced
-/// as <see cref="UpdateAsset.Sha256"/>, so the engine verifies integrity of the
+/// as <see cref="Asset.Sha256"/>, so the engine verifies integrity of the
 /// download against GitHub's published hash. (This is integrity, not authenticity:
 /// it does not prove the publisher's identity — use signed releases/manifests for
 /// that.)
@@ -66,7 +66,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
 
     private bool IsPrivate => _authToken is not null;
 
-    public async Task<IReadOnlyList<UpdateRelease>> GetReleasesAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<Release>> GetReleasesAsync(CancellationToken ct = default)
     {
         var url = $"https://api.github.com/repos/{_owner}/{_repo}/releases";
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
@@ -97,26 +97,26 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
             return [];
         }
 
-        var result = new List<UpdateRelease>(releases.Count);
+        var result = new List<Release>(releases.Count);
         foreach (var release in releases)
         {
             if (release.Draft == true)
                 continue;
             if (SemVersion.TryParse(release.TagName, SemVersionStyles.Any, out var version))
-                result.Add(new UpdateRelease(version, MapAssets(release), (release.Prerelease ?? false) || version.IsPrerelease));
+                result.Add(new Release(version, MapAssets(release), (release.Prerelease ?? false) || version.IsPrerelease));
         }
         return result;
     }
 
-    private IReadOnlyList<UpdateAsset> MapAssets(GitHubRelease release)
+    private IReadOnlyList<Asset> MapAssets(GitHubRelease release)
     {
-        var assets = new List<UpdateAsset>(release.Assets.Count);
+        var assets = new List<Asset>(release.Assets.Count);
         foreach (var a in release.Assets)
         {
             // For private repos download through the authenticated asset API
             // endpoint; for public repos the browser URL needs no credentials.
             var location = IsPrivate ? (a.Url ?? a.BrowserDownloadUrl) : a.BrowserDownloadUrl;
-            assets.Add(new UpdateAsset(a.Name, location, ParseDigest(a.Digest), a.Size));
+            assets.Add(new Asset(a.Name, location, ParseDigest(a.Digest), a.Size));
         }
         return assets;
     }
@@ -132,7 +132,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
             : null;
     }
 
-    public async Task<Stream> OpenAssetAsync(UpdateAsset asset, CancellationToken ct = default)
+    public async Task<Stream> OpenAssetAsync(Asset asset, CancellationToken ct = default)
     {
         using var req = new HttpRequestMessage(HttpMethod.Get, asset.Location);
         // The asset API returns a 302 to a signed CDN URL when asked for octets.
