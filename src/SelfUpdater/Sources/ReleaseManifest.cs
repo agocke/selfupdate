@@ -14,8 +14,8 @@ namespace SelfUpdater.Sources;
 ///       "version": "0.2.0",
 ///       "prerelease": false,
 ///       "assets": {
-///         "osx-arm64": { "url": "bowerd-osx-arm64", "sha256": "..." },
-///         "linux-x64": { "url": "https://.../bowerd-linux-x64" }
+///         "osx-arm64": { "url": "myapp-osx-arm64", "sha256": "..." },
+///         "linux-x64": { "url": "https://.../myapp-linux-x64" }
 ///       }
 ///     }
 ///   ]

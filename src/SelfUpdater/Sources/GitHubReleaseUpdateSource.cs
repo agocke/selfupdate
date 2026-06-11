@@ -89,7 +89,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
         List<GitHubRelease> releases;
         try
         {
-            releases = JsonSerializer.Deserialize<List<GitHubRelease>, ListProxy.De<GitHubRelease, GitHubRelease>>(json);
+            releases = JsonSerializer.Deserialize(json, List<GitHubRelease>.Deserialize);
         }
         catch (Exception)
         {

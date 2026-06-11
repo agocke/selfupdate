@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Security.Cryptography;
+using Serde;
 
 namespace SelfUpdater;
 
@@ -33,5 +34,13 @@ internal static class Utilities
         await using var stream = File.OpenRead(path);
         var hash = await SHA256.HashDataAsync(stream, ct).ConfigureAwait(false);
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+}
+
+internal static class SerdeExtensions
+{
+    extension<T>(List<T> list) where T : IDeserializeProvider<T>
+    {
+        public IDeserialize<List<T>> Deserialize => ListProxy.De<T, T>.Instance;
     }
 }
