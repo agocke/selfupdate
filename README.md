@@ -3,8 +3,8 @@
 A small, pluggable self-update engine for single-file / Native AOT .NET apps.
 
 It does what [dnvm](https://github.com/dn-vm/dnvm) does for itself, generalized:
-check the running version against a source, download the asset you pick for the
-current platform, verify (SHA-256, when the source publishes a hash) and optionally
+check the running version against a source, download the build for your platform,
+verify (SHA-256, when the source publishes a hash) and optionally
 validate (smoke-test) it, then replace the running executable **in place** via a
 two-process handoff so an app can update itself — including on Windows, where a
 running image can't overwrite itself.
@@ -17,90 +17,84 @@ dotnet add package SelfUpdater
 
 Targets `net10.0`, trim/AOT-compatible, serializes with [Serde.NET](https://github.com/serde-dotnet/serde).
 
-## Where updates come from is pluggable
+## Two ready-to-use updaters
 
-Everything hangs off one seam, `IUpdateSource`:
+Pick the one that matches where your releases live, hand it an `UpdaterOptions`, and
+call `UpdateAsync`:
 
-```csharp
-public interface IUpdateSource
-{
-    Task<IReadOnlyList<Release>> GetReleasesAsync(CancellationToken ct = default);
-    Task<Stream> OpenAssetAsync(Asset asset, CancellationToken ct = default);
-}
-```
-
-A source only ever *lists* what releases exist, each with all of its assets — it
-never compares versions, decides what counts as "new", or picks which asset fits
-the running platform. That policy stays with the caller, which knows its own
-current version and platform (e.g. its runtime identifier).
-
-Backends in the box:
-
-| Source | Use it for |
+| Updater | Use it for |
 |---|---|
-| `DirectoryUpdateSource` | A local folder or network share — LAN/offline/air-gapped rollouts, and tests. Lists the directory and infers releases from binary names (`{appName}-{version}-{rid}` by default; supply your own parser otherwise). Optional `{binary}.sha256` sidecars provide integrity. |
-| `GitHubReleaseUpdateSource` | GitHub Releases. Infers releases from asset names (`{appName}-{version}-{rid}` by default; supply your own parser otherwise) — assets that don't match are ignored. Public repos need nothing; **private** repos take an `authToken` delegate and download through the authenticated asset API. |
+| `DirectoryUpdater` | A local folder or network share — LAN/offline/air-gapped rollouts, and tests. Reads the directory's files; the ones matching `{appName}-{version}-{rid}` (or your parser) become releases. Optional `{binary}.sha256` sidecars provide integrity. |
+| `GitHubUpdater` | GitHub Releases. Reads each published asset; the ones matching `{appName}-{version}-{rid}` (or your parser) become releases — the rest are ignored. Public repos need nothing; **private** repos take an `authToken` delegate and download through the authenticated asset API. |
 
-Need another backend? Implementing `IUpdateSource` yourself is just those two methods.
+Both share the same engine via a common `Updater` base: a concrete updater only
+supplies how to *list* a source's raw artifacts and how to *open* one's bytes — it
+never parses versions, compares them, decides what counts as "new", or picks which
+asset fits the running platform. All of that policy lives in `UpdaterOptions`, which
+knows your current version and target platform (its runtime identifier).
 
 ## Usage
 
 The engine is **policy-free**: you tell it your current version (it never fetches
-it for you), and you pick which asset matches your platform (it never guesses from
-file names or RIDs). It decides nothing about what is "new" unless you ask it to.
+it for you) via `UpdaterOptions`, and it decides nothing about what is "new" unless
+you ask it to. Naming and platform selection live in `UpdaterOptions`. Build the
+options, create an updater, and call `UpdateAsync`:
 
 ```csharp
-using System.Runtime.InteropServices;
 using Semver;
 using SelfUpdater;
-using SelfUpdater.Sources;
 
-var source = new DirectoryUpdateSource("/path/to/releases", "myapp");
-
-var updater = new Updater(source, new UpdaterOptions
+var updater = new DirectoryUpdater("/path/to/releases", new UpdaterOptions
 {
+    AppName = "myapp",
+    // You own the current version; the engine never fetches it for you. Versions
+    // are Semver.SemVersion (the Semver NuGet package).
+    CurrentVersion = SemVersion.Parse(MyApp.Version, SemVersionStyles.Any),
+    // Rid defaults to RuntimeInformation.RuntimeIdentifier — the running platform.
+    // It selects assets named `{AppName}-{version}-{Rid}` and is what lets the
+    // engine split that name unambiguously (both the version and the rid may
+    // contain dashes). Set Parser for a naming scheme other than the default.
     // TargetPath defaults to the running executable.
     // ValidateArgs is opt-in: leave unset to skip executing the download as a
     // smoke test, or set e.g. ["--version"] if your binary exits 0 for those.
 });
 
-// You own the current version and the platform → asset mapping. Versions are
-// Semver.SemVersion (the Semver NuGet package).
-var current = SemVersion.Parse(MyApp.Version, SemVersionStyles.Any);
-var rid = RuntimeInformation.RuntimeIdentifier;
-
-// Convenience overload: newest-wins, you supply the asset selector.
-// Every source names assets by their RID (parsed from the `{appName}-{version}-{rid}`
-// convention, or your custom parser), so match against the RID you want.
-var result = await updater.UpdateAsync(current, asset => asset.Name == rid);
+// Newest-wins against CurrentVersion, for the selected platform.
+var result = await updater.UpdateAsync();
 if (result.Outcome == UpdateOutcome.Staged)
     return 0; // a newer build was handed off; this process should now exit
 ```
 
-Pass a release filter to ignore prereleases, and `CheckAsync` to look without
-applying:
+For GitHub Releases, swap in `GitHubUpdater` — the options are identical:
 
 ```csharp
-var check = await updater.CheckAsync(current, releaseFilter: r => !r.IsPrerelease);
-if (check.UpdateAvailable)
-    Console.WriteLine($"New version {check.Latest!.Version} available.");
+var updater = new GitHubUpdater("you", "myapp", options);
 ```
 
-Need full control (pin a channel, roll back, custom asset rules, ...)? Drop to the
-policy-free core — `GetReleasesAsync` lists everything; you choose the release and
-the asset, then `ApplyAsync` a single asset:
+Set `ReleaseFilter` to ignore prereleases. To peek without applying, call
+`FetchAsync()` — it does the network round-trip and returns the exact `Release`
+you'd move to (or `null` when you're already current or there's no build for your
+platform):
 
 ```csharp
-var releases = await updater.GetReleasesAsync();
-var chosen = releases
-    .Where(r => r.Version.ComparePrecedenceTo(current) > 0 && !r.IsPrerelease)
-    .OrderByDescending(r => r.Version, SemVersion.PrecedenceComparer)
-    .FirstOrDefault();
+var updater = new GitHubUpdater("you", "myapp", new UpdaterOptions
+{
+    AppName = "myapp",
+    CurrentVersion = current,
+    ReleaseFilter = r => !r.IsPrerelease,
+});
 
-var asset = chosen?.Assets.FirstOrDefault(a => a.Name == rid);
-if (asset is not null)
-    await updater.ApplyAsync(asset);
+var release = await updater.FetchAsync();
+if (release is not null)
+{
+    Console.WriteLine($"New version {release.Version} available.");
+    await updater.ApplyAsync(release); // download, verify, stage, hand off
+}
 ```
+
+The surface is three methods: `FetchAsync()` resolves the release to move to,
+`ApplyAsync(release)` downloads and stages it, and `UpdateAsync()` is shorthand for
+fetch-then-apply (so it never lists the source twice).
 
 ### The handoff command
 
@@ -125,8 +119,8 @@ The library is auth-mechanism agnostic — `authToken` is a
 fetch/cache/refresh short-lived or rotating tokens however it likes:
 
 ```csharp
-var gh = new GitHubReleaseUpdateSource(
-    owner: "you", repo: "private-app", appName: "private-app",
+var gh = new GitHubUpdater(
+    owner: "you", repo: "private-app", options,
     authToken: ct => TokenCache.GetCurrentInstallationTokenAsync(ct)); // your concern
 ```
 

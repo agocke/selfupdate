@@ -2,78 +2,55 @@ using System.Net.Http.Headers;
 using Serde;
 using Serde.Json;
 
-namespace SelfUpdater.Sources;
+namespace SelfUpdater;
 
 /// <summary>
-/// Update source backed by the GitHub Releases API. Lists the repo's releases and
-/// infers releases from the asset file names, using the default
-/// <c>{appName}-{version}-{rid}</c> naming convention (or a custom
-/// <see cref="AssetNameParser"/>); assets that don't follow the convention are
-/// ignored. The caller decides which release is newer than what it is running and
-/// which asset matches its platform.
+/// Self-updater for apps distributed via GitHub Releases. Lists the repo's releases,
+/// selects the asset for the configured platform (per <see cref="UpdaterOptions"/>),
+/// downloads and verifies it, then hands off to the new binary to replace the running
+/// one in place.
 /// <para>
-/// Draft releases are skipped (they are unpublished); prereleases are included and
-/// flagged via <see cref="Release.IsPrerelease"/> so the caller can filter
-/// them. Only the first page of releases (the most recent ~30) is returned, which
-/// is sufficient for "is there anything newer than me" decisions.
+/// Draft releases are skipped; prereleases are flagged. When GitHub reports an asset
+/// <c>digest</c> (e.g. <c>sha256:…</c>) it is verified against the download.
 /// </para>
 /// <para>
-/// When GitHub reports an asset <c>digest</c> (e.g. <c>sha256:…</c>) it is surfaced
-/// as <see cref="Asset.Sha256"/>, so the engine verifies integrity of the
-/// download against GitHub's published hash. (This is integrity, not authenticity:
-/// it does not prove the publisher's identity — use signed releases/manifests for
-/// that.)
-/// </para>
-/// <para>
-/// Works with <b>private</b> repositories: supply <c>authToken</c> and the source
-/// authenticates the API call and downloads the asset through the authenticated
-/// asset API endpoint (with <c>Accept: application/octet-stream</c>) rather than
-/// the public <c>browser_download_url</c>. The token is fetched per request via a
-/// delegate so short-lived / rotating credentials (GitHub App installation tokens,
-/// fine-grained PATs) refresh automatically.
+/// Works with <b>private</b> repositories: supply an <c>authToken</c> and the updater
+/// authenticates the API call and downloads through the authenticated asset endpoint
+/// (with <c>Accept: application/octet-stream</c>) rather than the public
+/// <c>browser_download_url</c>. The token is fetched per request via a delegate so
+/// short-lived / rotating credentials (GitHub App installation tokens, fine-grained
+/// PATs) refresh automatically.
 /// </para>
 /// </summary>
-public sealed class GitHubReleaseUpdateSource : IUpdateSource
+public sealed class GitHubUpdater : Updater
 {
     private const string ApiVersion = "2022-11-28";
 
     private readonly string _owner;
     private readonly string _repo;
-    private readonly AssetNameParser _parse;
     private readonly Func<CancellationToken, Task<string?>>? _authToken;
     private readonly HttpClient _http;
 
     /// <param name="owner">Repository owner (user or org).</param>
     /// <param name="repo">Repository name.</param>
-    /// <param name="appName">
-    /// Application name for the default <c>{appName}-{version}-{rid}</c> asset-naming
-    /// convention. Each release asset's file name is parsed into a (version, rid);
-    /// assets that don't follow the convention are ignored. Pass <paramref name="parse"/>
-    /// for any other scheme.
-    /// </param>
-    /// <param name="parse">
-    /// Optional override for how asset names map to (version, rid). When omitted the
-    /// default <c>{appName}-{version}-{rid}</c> convention is used.
-    /// </param>
+    /// <param name="options">Identity, version, platform, and swap settings.</param>
     /// <param name="authToken">
     /// Optional callback returning a bearer token for the GitHub API. Required for
     /// private repositories; omit for public ones. Awaited once per request so a
-    /// consumer can fetch/cache/refresh rotating, short-lived tokens (e.g. a vended
-    /// GitHub App installation token) however it likes.
+    /// consumer can fetch/cache/refresh rotating, short-lived tokens however it likes.
     /// </param>
     /// <param name="http">Optional pre-configured <see cref="HttpClient"/> (e.g. with proxy/handlers).</param>
-    public GitHubReleaseUpdateSource(
+    public GitHubUpdater(
         string owner,
         string repo,
-        string appName,
-        AssetNameParser? parse = null,
+        UpdaterOptions options,
         Func<CancellationToken, Task<string?>>? authToken = null,
         HttpClient? http = null
     )
+        : base(options)
     {
         _owner = owner;
         _repo = repo;
-        _parse = parse ?? AssetNaming.DefaultParser(appName);
         _authToken = authToken;
         _http = http ?? new HttpClient();
         if (!_http.DefaultRequestHeaders.UserAgent.Any())
@@ -84,7 +61,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
 
     private bool IsPrivate => _authToken is not null;
 
-    public async Task<IReadOnlyList<Release>> GetReleasesAsync(CancellationToken ct = default)
+    internal override async Task<IReadOnlyList<SourceAsset>> GetAssetsAsync(CancellationToken ct)
     {
         var url = $"https://api.github.com/repos/{_owner}/{_repo}/releases";
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
@@ -115,7 +92,7 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
             return [];
         }
 
-        var candidates = new List<AssetNaming.Candidate>();
+        var assets = new List<SourceAsset>();
         foreach (var release in releases)
         {
             if (release.Draft == true)
@@ -125,8 +102,8 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
                 // For private repos download through the authenticated asset API
                 // endpoint; for public repos the browser URL needs no credentials.
                 var location = IsPrivate ? (a.Url ?? a.BrowserDownloadUrl) : a.BrowserDownloadUrl;
-                candidates.Add(
-                    new(
+                assets.Add(
+                    new SourceAsset(
                         a.Name,
                         location,
                         ParseDigest(a.Digest),
@@ -137,21 +114,10 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
             }
         }
 
-        return AssetNaming.ToReleases(candidates, _parse);
+        return assets;
     }
 
-    /// <summary>GitHub reports asset digests as "&lt;algo&gt;:&lt;hex&gt;"; we use the SHA-256 hex.</summary>
-    private static string? ParseDigest(string? digest)
-    {
-        if (string.IsNullOrEmpty(digest))
-            return null;
-        const string prefix = "sha256:";
-        return digest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            ? digest[prefix.Length..]
-            : null;
-    }
-
-    public async Task<Stream> OpenAssetAsync(Asset asset, CancellationToken ct = default)
+    internal override async Task<Stream> OpenAssetAsync(SourceAsset asset, CancellationToken ct)
     {
         using var req = new HttpRequestMessage(HttpMethod.Get, asset.Location);
         // The asset API returns a 302 to a signed CDN URL when asked for octets.
@@ -165,6 +131,17 @@ public sealed class GitHubReleaseUpdateSource : IUpdateSource
             .ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
         return await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>GitHub reports asset digests as "&lt;algo&gt;:&lt;hex&gt;"; we use the SHA-256 hex.</summary>
+    private static string? ParseDigest(string? digest)
+    {
+        if (string.IsNullOrEmpty(digest))
+            return null;
+        const string prefix = "sha256:";
+        return digest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            ? digest[prefix.Length..]
+            : null;
     }
 
     private async Task AddAuthAsync(HttpRequestMessage req, CancellationToken ct)
