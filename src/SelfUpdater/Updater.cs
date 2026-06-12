@@ -1,7 +1,43 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Semver;
 
 namespace SelfUpdater;
+
+/// <summary>
+/// A raw, source-provided build artifact, identified by the publisher's own
+/// <see cref="Name"/> (a GitHub asset file name, a directory file name, ...). The
+/// name is interpreted only by the updater's naming convention (see
+/// <see cref="AssetNameParser"/>). <see cref="Location"/> is opaque to the shared
+/// engine and interpreted only by the updater that produced it (a URL for
+/// <see cref="GitHubUpdater"/>, a file path for <see cref="DirectoryUpdater"/>).
+/// </summary>
+/// <param name="Name">The source's own asset name, fed to the naming convention.</param>
+/// <param name="Location">Where the asset can be opened from (path or URL).</param>
+/// <param name="Sha256">Optional integrity hash, if the source published one.</param>
+/// <param name="Size">Optional asset size in bytes, if known.</param>
+/// <param name="IsPrerelease">
+/// A source-side prerelease signal (e.g. GitHub's <c>prerelease</c> flag) OR-ed into
+/// the resulting release's <see cref="Release.IsPrerelease"/>, on top of whatever the
+/// parsed version itself indicates.
+/// </param>
+public sealed record SourceAsset(
+    string Name,
+    string Location,
+    string? Sha256 = null,
+    long? Size = null,
+    bool IsPrerelease = false
+);
+
+/// <summary>A release for the configured platform, parsed from a source's assets.</summary>
+/// <param name="Version">The release version, parsed from the asset's name.</param>
+/// <param name="Asset">The raw asset for the configured <see cref="UpdaterOptions.Rid"/>.</param>
+/// <param name="IsPrerelease">
+/// True when the publisher marked this a prerelease (GitHub's <c>prerelease</c> flag,
+/// or a SemVer prerelease suffix). Surfaced so a consumer can choose to skip
+/// prereleases via <see cref="UpdaterOptions.ReleaseFilter"/>.
+/// </param>
+public sealed record Release(SemVersion Version, SourceAsset Asset, bool IsPrerelease = false);
 
 /// <summary>Result of comparing the running build against a source's releases.</summary>
 public sealed record UpdateCheck(bool UpdateAvailable, SemVersion Current, Release? Latest);
@@ -14,7 +50,7 @@ public enum UpdateOutcome
     /// <summary>A newer build was downloaded, validated, and handed off; the caller should now exit.</summary>
     Staged,
 
-    /// <summary>A newer version exists but the source had no asset for this RID.</summary>
+    /// <summary>The source has builds, but none for the configured RID.</summary>
     NoAssetForPlatform,
 
     /// <summary>The running process is not a self-contained single file, so it cannot replace itself.</summary>
@@ -30,8 +66,48 @@ public sealed record UpdateResult(
     string? Message = null
 );
 
-public sealed class UpdaterOptions
+/// <summary>
+/// Everything an updater needs: the app's identity and version, the platform to
+/// target, how asset names map to releases, and how to stage the swap. Build one up,
+/// hand it to a concrete updater (e.g. <c>new GitHubUpdater(owner, repo, options)</c>),
+/// then call <c>UpdateAsync</c> / <c>CheckAsync</c>.
+/// </summary>
+public sealed record UpdaterOptions
 {
+    /// <summary>
+    /// Application name for the default <c>{appName}-{version}-{rid}</c> naming
+    /// convention. Ignored when a custom <see cref="Parser"/> is supplied.
+    /// </summary>
+    public required string AppName { get; init; }
+
+    /// <summary>
+    /// The version the app is currently running. The updater never fetches this for
+    /// you; you own it. A release is "newer" when its version has higher precedence.
+    /// </summary>
+    public required SemVersion CurrentVersion { get; init; }
+
+    /// <summary>
+    /// Target runtime identifier (e.g. <c>osx-arm64</c>): the suffix the default
+    /// convention selects on, and what makes the otherwise-ambiguous
+    /// <c>{version}-{rid}</c> tail splittable. Defaults to the running platform's
+    /// <see cref="RuntimeInformation.RuntimeIdentifier"/>.
+    /// </summary>
+    public string Rid { get; init; } = RuntimeInformation.RuntimeIdentifier;
+
+    /// <summary>
+    /// Optional override for how a raw asset name maps to <c>(version, rid)</c>. When
+    /// omitted the default <c>{appName}-{version}-{rid}</c> convention is used. Only
+    /// assets whose mapped rid equals <see cref="Rid"/> are kept.
+    /// </summary>
+    public AssetNameParser? Parser { get; init; }
+
+    /// <summary>
+    /// Optional predicate restricting which releases are considered (e.g.
+    /// <c>r =&gt; !r.IsPrerelease</c> to ignore prereleases). When <c>null</c> every
+    /// release for the platform is a candidate.
+    /// </summary>
+    public Func<Release, bool>? ReleaseFilter { get; init; }
+
     /// <summary>Path of the binary to replace. Defaults to the running executable.</summary>
     public string? TargetPath { get; init; }
 
@@ -54,23 +130,19 @@ public sealed class UpdaterOptions
 }
 
 /// <summary>
-/// Source-agnostic self-update engine, modeled on dnvm: list the releases a
-/// source offers, download a chosen one's matching asset, verify and validate it,
-/// then hand off to the new binary which replaces the old one in place (a
-/// two-process swap so a running executable can update itself, including on
-/// Windows).
+/// Source-agnostic self-update engine, modeled on dnvm. A concrete updater
+/// (<see cref="GitHubUpdater"/>, <see cref="DirectoryUpdater"/>) supplies just two
+/// things — how to list a source's raw assets and how to open one's bytes — and this
+/// base does the rest: turn asset names into releases for the configured platform,
+/// pick the newest, download and verify it, then hand off to the new binary which
+/// replaces the old one in place (a two-process swap so a running executable can
+/// update itself, including on Windows).
 /// <para>
-/// The engine is deliberately <b>policy-free</b>: it neither knows nor fetches the
-/// caller's current version, never decides what counts as "new", and never picks
-/// which asset suits the running platform. The caller owns its version, the version
-/// comparison, and asset selection. Use <see cref="GetReleasesAsync"/> +
-/// <see cref="ApplyAsync(Asset, CancellationToken)"/> for full control, or the
-/// <see cref="UpdateAsync"/> / <see cref="CheckAsync"/> convenience overloads (which
-/// take the caller's current version plus an asset selector and apply the common
-/// "newest wins" policy) for the simple case.
+/// The caller owns its current version (<see cref="UpdaterOptions.CurrentVersion"/>);
+/// the engine owns naming, platform selection, and the "newest wins" comparison.
 /// </para>
 /// </summary>
-public sealed class Updater
+public abstract class Updater
 {
     // Wire contract for the handoff (new-process) side. The host app registers a
     // command/handler with these exact names; keeping them here makes this the
@@ -80,37 +152,102 @@ public sealed class Updater
     public const string PidOption = "--pid";
     public const string RelaunchOption = "--relaunch";
 
-    private readonly IUpdateSource _source;
     private readonly UpdaterOptions _options;
+    private readonly AssetNameParser _parse;
     private readonly TextWriter _log;
 
-    public Updater(IUpdateSource source, UpdaterOptions options)
+    protected Updater(UpdaterOptions options)
     {
-        _source = source;
         _options = options;
+        _parse = options.Parser ?? AssetNaming.DefaultParser(options.AppName, options.Rid);
         _log = options.Log;
     }
 
     /// <summary>
-    /// List the releases the source offers. The caller compares them against its own
-    /// current version to decide whether any are new, and selects the asset matching
-    /// its platform; this method applies no policy of its own.
+    /// List every raw artifact this source can see, with whatever metadata it knows
+    /// (location, integrity hash, size, prerelease hint). Returns an empty list if the
+    /// source could not be reached or parsed. Order is not significant.
     /// </summary>
-    public Task<IReadOnlyList<Release>> GetReleasesAsync(CancellationToken ct = default) =>
-        _source.GetReleasesAsync(ct);
+    internal abstract Task<IReadOnlyList<SourceAsset>> GetAssetsAsync(CancellationToken ct);
+
+    /// <summary>Open a read stream over an asset's bytes for downloading.</summary>
+    internal abstract Task<Stream> OpenAssetAsync(SourceAsset asset, CancellationToken ct);
 
     /// <summary>
-    /// Download, validate, and stage a specific asset the caller has chosen, then
-    /// hand off to the new binary. Performs <b>no</b> version comparison or asset
-    /// selection — it applies exactly the asset it is given. The caller is
-    /// responsible for having decided this asset is the right, newer build.
+    /// List the releases available for the configured platform, with asset names
+    /// parsed into versions and filtered to <see cref="UpdaterOptions.Rid"/>. Internal
+    /// helper behind <see cref="CheckAsync"/> / <see cref="UpdateAsync"/> (and a
+    /// naming/selection testing seam); applies no version comparison and no
+    /// <see cref="UpdaterOptions.ReleaseFilter"/>.
     /// </summary>
-    public Task<UpdateResult> ApplyAsync(Asset asset, CancellationToken ct = default) =>
-        ApplyAssetAsync(asset, version: null, ct);
+    internal async Task<IReadOnlyList<Release>> GetReleasesAsync(CancellationToken ct = default)
+    {
+        var assets = await GetAssetsAsync(ct).ConfigureAwait(false);
+        return AssetNaming.ToReleases(assets, _parse, _options.Rid);
+    }
+
+    /// <summary>
+    /// Report whether any release is newer than
+    /// <see cref="UpdaterOptions.CurrentVersion"/>, returning the newest one (after
+    /// applying <see cref="UpdaterOptions.ReleaseFilter"/>).
+    /// </summary>
+    public async Task<UpdateCheck> CheckAsync(CancellationToken ct = default)
+    {
+        var current = _options.CurrentVersion;
+        _log.WriteLine($"Checking for updates (current {current})...");
+        var releases = await GetReleasesAsync(ct).ConfigureAwait(false);
+        var newest = Newest(releases, _options.ReleaseFilter);
+        if (newest is null)
+        {
+            _log.WriteLine("Update source returned no release information.");
+            return new UpdateCheck(false, current, null);
+        }
+
+        var available = newest.Version.ComparePrecedenceTo(current) > 0;
+        _log.WriteLine(
+            available
+                ? $"Update available: {newest.Version}"
+                : $"Up to date (latest {newest.Version})."
+        );
+        return new UpdateCheck(available, current, newest);
+    }
+
+    /// <summary>
+    /// Pick the newest release (after <see cref="UpdaterOptions.ReleaseFilter"/>); if it
+    /// is newer than <see cref="UpdaterOptions.CurrentVersion"/>, download, validate, and
+    /// stage its asset, then hand off. If the source offers builds but none for the
+    /// configured RID, reports <see cref="UpdateOutcome.NoAssetForPlatform"/>;
+    /// otherwise <see cref="UpdateOutcome.UpToDate"/>.
+    /// </summary>
+    public async Task<UpdateResult> UpdateAsync(CancellationToken ct = default)
+    {
+        var assets = await GetAssetsAsync(ct).ConfigureAwait(false);
+        var releases = AssetNaming.ToReleases(assets, _parse, _options.Rid);
+        var newest = Newest(releases, _options.ReleaseFilter);
+        if (newest is null)
+        {
+            if (assets.Count > 0)
+            {
+                _log.WriteLine($"Source has builds, but none for {_options.Rid}.");
+                return new UpdateResult(
+                    UpdateOutcome.NoAssetForPlatform,
+                    null,
+                    $"No asset for {_options.Rid}."
+                );
+            }
+            _log.WriteLine("Update source returned no release information.");
+            return new UpdateResult(UpdateOutcome.UpToDate);
+        }
+
+        if (newest.Version.ComparePrecedenceTo(_options.CurrentVersion) <= 0)
+            return new UpdateResult(UpdateOutcome.UpToDate, newest.Version);
+
+        return await ApplyAssetAsync(newest.Asset, newest.Version, ct).ConfigureAwait(false);
+    }
 
     private async Task<UpdateResult> ApplyAssetAsync(
-        Asset asset,
-        SemVersion? version,
+        SourceAsset asset,
+        SemVersion version,
         CancellationToken ct
     )
     {
@@ -147,78 +284,6 @@ public sealed class Updater
         return new UpdateResult(UpdateOutcome.Staged, version);
     }
 
-    /// <summary>
-    /// Convenience over <see cref="GetReleasesAsync"/>: report whether any release is
-    /// newer than <paramref name="currentVersion"/>, returning the newest one.
-    /// Pass <paramref name="releaseFilter"/> to restrict the candidates (e.g.
-    /// <c>r =&gt; !r.IsPrerelease</c> to ignore prereleases).
-    /// </summary>
-    public async Task<UpdateCheck> CheckAsync(
-        SemVersion currentVersion,
-        Func<Release, bool>? releaseFilter = null,
-        CancellationToken ct = default
-    )
-    {
-        _log.WriteLine($"Checking for updates (current {currentVersion})...");
-        var releases = await GetReleasesAsync(ct).ConfigureAwait(false);
-        var newest = Newest(releases, releaseFilter);
-        if (newest is null)
-        {
-            _log.WriteLine("Update source returned no release information.");
-            return new UpdateCheck(false, currentVersion, null);
-        }
-
-        var available = newest.Version.ComparePrecedenceTo(currentVersion) > 0;
-        _log.WriteLine(
-            available
-                ? $"Update available: {newest.Version}"
-                : $"Up to date (latest {newest.Version})."
-        );
-        return new UpdateCheck(available, currentVersion, newest);
-    }
-
-    /// <summary>
-    /// Convenience over <see cref="GetReleasesAsync"/> + <see cref="ApplyAsync(Asset, CancellationToken)"/>:
-    /// pick the newest release (optionally restricted by <paramref name="releaseFilter"/>);
-    /// if it is newer than <paramref name="currentVersion"/>, select its asset with
-    /// <paramref name="assetSelector"/> and apply it, otherwise report
-    /// <see cref="UpdateOutcome.UpToDate"/>. If the newest release ships no asset the
-    /// selector accepts, reports <see cref="UpdateOutcome.NoAssetForPlatform"/>.
-    /// </summary>
-    public async Task<UpdateResult> UpdateAsync(
-        SemVersion currentVersion,
-        Func<Asset, bool> assetSelector,
-        Func<Release, bool>? releaseFilter = null,
-        CancellationToken ct = default
-    )
-    {
-        var releases = await GetReleasesAsync(ct).ConfigureAwait(false);
-        var newest = Newest(releases, releaseFilter);
-        if (newest is null || newest.Version.ComparePrecedenceTo(currentVersion) <= 0)
-            return new UpdateResult(UpdateOutcome.UpToDate, newest?.Version);
-
-        Asset? asset = null;
-        foreach (var candidate in newest.Assets)
-        {
-            if (assetSelector(candidate))
-            {
-                asset = candidate;
-                break;
-            }
-        }
-        if (asset is null)
-        {
-            _log.WriteLine($"No matching asset in release {newest.Version} for this platform.");
-            return new UpdateResult(
-                UpdateOutcome.NoAssetForPlatform,
-                newest.Version,
-                "No matching asset."
-            );
-        }
-
-        return await ApplyAssetAsync(asset, newest.Version, ct).ConfigureAwait(false);
-    }
-
     /// <summary>Pick the highest-version release, after applying an optional filter.</summary>
     private static Release? Newest(IReadOnlyList<Release> releases, Func<Release, bool>? filter)
     {
@@ -234,7 +299,7 @@ public sealed class Updater
     }
 
     private async Task<string?> DownloadAndValidateAsync(
-        Asset asset,
+        SourceAsset asset,
         string target,
         CancellationToken ct
     )
@@ -247,7 +312,7 @@ public sealed class Updater
         _log.WriteLine($"Downloading {asset.Location}...");
         try
         {
-            await using var src = await _source.OpenAssetAsync(asset, ct).ConfigureAwait(false);
+            await using var src = await OpenAssetAsync(asset, ct).ConfigureAwait(false);
             await using var file = new FileStream(
                 staged,
                 FileMode.CreateNew,
@@ -343,9 +408,10 @@ public sealed class Updater
     }
 
     /// <summary>
-    /// The handoff (new-process) side of the swap. Runs from the freshly
-    /// downloaded binary: waits for the previous process to exit, replaces the
-    /// target with itself, and optionally relaunches.
+    /// The handoff (new-process) side of the swap. Runs from the freshly downloaded
+    /// binary: waits for the previous process to exit, replaces the target with
+    /// itself, and optionally relaunches. Wire this up in your entry point under
+    /// <see cref="HandoffVerb"/>.
     /// </summary>
     public static int ApplySwap(
         string destPath,
