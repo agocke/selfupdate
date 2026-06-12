@@ -39,9 +39,6 @@ public sealed record SourceAsset(
 /// </param>
 public sealed record Release(SemVersion Version, SourceAsset Asset, bool IsPrerelease = false);
 
-/// <summary>Result of comparing the running build against a source's releases.</summary>
-public sealed record UpdateCheck(bool UpdateAvailable, SemVersion Current, Release? Latest);
-
 public enum UpdateOutcome
 {
     /// <summary>Already on the latest version (or newer).</summary>
@@ -49,9 +46,6 @@ public enum UpdateOutcome
 
     /// <summary>A newer build was downloaded, validated, and handed off; the caller should now exit.</summary>
     Staged,
-
-    /// <summary>The source has builds, but none for the configured RID.</summary>
-    NoAssetForPlatform,
 
     /// <summary>The running process is not a self-contained single file, so it cannot replace itself.</summary>
     NotSelfContained,
@@ -70,7 +64,7 @@ public sealed record UpdateResult(
 /// Everything an updater needs: the app's identity and version, the platform to
 /// target, how asset names map to releases, and how to stage the swap. Build one up,
 /// hand it to a concrete updater (e.g. <c>new GitHubUpdater(owner, repo, options)</c>),
-/// then call <c>UpdateAsync</c> / <c>CheckAsync</c>.
+/// then call <c>UpdateAsync</c> (or <c>FetchAsync</c> + <c>ApplyAsync</c>).
 /// </summary>
 public sealed record UpdaterOptions
 {
@@ -175,9 +169,8 @@ public abstract class Updater
 
     /// <summary>
     /// List the releases available for the configured platform, with asset names
-    /// parsed into versions and filtered to <see cref="UpdaterOptions.Rid"/>. Internal
-    /// helper behind <see cref="CheckAsync"/> / <see cref="UpdateAsync"/> (and a
-    /// naming/selection testing seam); applies no version comparison and no
+    /// parsed into versions and filtered to <see cref="UpdaterOptions.Rid"/>. A
+    /// naming/selection testing seam; applies no version comparison and no
     /// <see cref="UpdaterOptions.ReleaseFilter"/>.
     /// </summary>
     internal async Task<IReadOnlyList<Release>> GetReleasesAsync(CancellationToken ct = default)
@@ -187,104 +180,94 @@ public abstract class Updater
     }
 
     /// <summary>
-    /// Report whether any release is newer than
-    /// <see cref="UpdaterOptions.CurrentVersion"/>, returning the newest one (after
-    /// applying <see cref="UpdaterOptions.ReleaseFilter"/>).
+    /// Resolve the exact release this updater would move to: the newest release for the
+    /// configured platform (after <see cref="UpdaterOptions.ReleaseFilter"/>) whose
+    /// version is newer than <see cref="UpdaterOptions.CurrentVersion"/>. Returns
+    /// <c>null</c> when nothing applies — already up to date, or the source has no build
+    /// for this platform. This is the network round-trip; hand the result to
+    /// <see cref="ApplyAsync"/> to download and stage it (or just call
+    /// <see cref="UpdateAsync"/>, which does both).
     /// </summary>
-    public async Task<UpdateCheck> CheckAsync(CancellationToken ct = default)
+    public async Task<Release?> FetchAsync(CancellationToken ct = default)
     {
         var current = _options.CurrentVersion;
         _log.WriteLine($"Checking for updates (current {current})...");
-        var releases = await GetReleasesAsync(ct).ConfigureAwait(false);
-        var newest = Newest(releases, _options.ReleaseFilter);
-        if (newest is null)
-        {
-            _log.WriteLine("Update source returned no release information.");
-            return new UpdateCheck(false, current, null);
-        }
-
-        var available = newest.Version.ComparePrecedenceTo(current) > 0;
-        _log.WriteLine(
-            available
-                ? $"Update available: {newest.Version}"
-                : $"Up to date (latest {newest.Version})."
-        );
-        return new UpdateCheck(available, current, newest);
-    }
-
-    /// <summary>
-    /// Pick the newest release (after <see cref="UpdaterOptions.ReleaseFilter"/>); if it
-    /// is newer than <see cref="UpdaterOptions.CurrentVersion"/>, download, validate, and
-    /// stage its asset, then hand off. If the source offers builds but none for the
-    /// configured RID, reports <see cref="UpdateOutcome.NoAssetForPlatform"/>;
-    /// otherwise <see cref="UpdateOutcome.UpToDate"/>.
-    /// </summary>
-    public async Task<UpdateResult> UpdateAsync(CancellationToken ct = default)
-    {
         var assets = await GetAssetsAsync(ct).ConfigureAwait(false);
         var releases = AssetNaming.ToReleases(assets, _parse, _options.Rid);
         var newest = Newest(releases, _options.ReleaseFilter);
         if (newest is null)
         {
             if (assets.Count > 0)
-            {
                 _log.WriteLine($"Source has builds, but none for {_options.Rid}.");
-                return new UpdateResult(
-                    UpdateOutcome.NoAssetForPlatform,
-                    null,
-                    $"No asset for {_options.Rid}."
-                );
-            }
-            _log.WriteLine("Update source returned no release information.");
-            return new UpdateResult(UpdateOutcome.UpToDate);
+            else
+                _log.WriteLine("Update source returned no release information.");
+            return null;
         }
 
-        if (newest.Version.ComparePrecedenceTo(_options.CurrentVersion) <= 0)
-            return new UpdateResult(UpdateOutcome.UpToDate, newest.Version);
+        if (newest.Version.ComparePrecedenceTo(current) <= 0)
+        {
+            _log.WriteLine($"Up to date (latest {newest.Version}).");
+            return null;
+        }
 
-        return await ApplyAssetAsync(newest.Asset, newest.Version, ct).ConfigureAwait(false);
+        _log.WriteLine($"Update available: {newest.Version}");
+        return newest;
     }
 
-    private async Task<UpdateResult> ApplyAssetAsync(
-        SourceAsset asset,
-        SemVersion version,
-        CancellationToken ct
-    )
+    /// <summary>
+    /// Download, validate, and stage a release resolved by <see cref="FetchAsync"/>,
+    /// then hand off to the new binary. Applies exactly the given release — it does no
+    /// version comparison of its own.
+    /// </summary>
+    public async Task<UpdateResult> ApplyAsync(Release release, CancellationToken ct = default)
     {
         if (!_options.AllowNonSingleFile && !Utilities.IsSingleFile())
         {
             _log.WriteLine(
                 "Cannot self-update: not deployed as a single file (e.g. running via 'dotnet run')."
             );
-            return new UpdateResult(UpdateOutcome.NotSelfContained, version);
+            return new UpdateResult(UpdateOutcome.NotSelfContained, release.Version);
         }
 
         var target = _options.TargetPath ?? Utilities.ProcessPath;
         if (string.IsNullOrEmpty(target))
         {
             _log.WriteLine("Cannot self-update: unable to determine the target executable path.");
-            return new UpdateResult(UpdateOutcome.Failed, version, "Unknown target path.");
+            return new UpdateResult(UpdateOutcome.Failed, release.Version, "Unknown target path.");
         }
 
-        var staged = await DownloadAndValidateAsync(asset, target, ct).ConfigureAwait(false);
+        var staged = await DownloadAndValidateAsync(release.Asset, target, ct)
+            .ConfigureAwait(false);
         if (staged is null)
             return new UpdateResult(
                 UpdateOutcome.Failed,
-                version,
+                release.Version,
                 "Download or validation failed."
             );
 
         if (!LaunchHandoff(staged, target))
             return new UpdateResult(
                 UpdateOutcome.Failed,
-                version,
+                release.Version,
                 "Could not launch the handoff process."
             );
 
-        return new UpdateResult(UpdateOutcome.Staged, version);
+        return new UpdateResult(UpdateOutcome.Staged, release.Version);
     }
 
-    /// <summary>Pick the highest-version release, after applying an optional filter.</summary>
+    /// <summary>
+    /// Shorthand for <see cref="FetchAsync"/> followed by <see cref="ApplyAsync"/>:
+    /// resolve the release to move to and, if there is one, download, validate, stage,
+    /// and hand off. Reports <see cref="UpdateOutcome.UpToDate"/> when nothing applies.
+    /// </summary>
+    public async Task<UpdateResult> UpdateAsync(CancellationToken ct = default)
+    {
+        var release = await FetchAsync(ct).ConfigureAwait(false);
+        if (release is null)
+            return new UpdateResult(UpdateOutcome.UpToDate);
+        return await ApplyAsync(release, ct).ConfigureAwait(false);
+    }
+
     private static Release? Newest(IReadOnlyList<Release> releases, Func<Release, bool>? filter)
     {
         Release? best = null;

@@ -71,8 +71,10 @@ For GitHub Releases, swap in `GitHubUpdater` — the options are identical:
 var updater = new GitHubUpdater("you", "myapp", options);
 ```
 
-Set `ReleaseFilter` to ignore prereleases, and use `CheckAsync` to look without
-applying:
+Set `ReleaseFilter` to ignore prereleases. To peek without applying, call
+`FetchAsync()` — it does the network round-trip and returns the exact `Release`
+you'd move to (or `null` when you're already current or there's no build for your
+platform):
 
 ```csharp
 var updater = new GitHubUpdater("you", "myapp", new UpdaterOptions
@@ -82,12 +84,17 @@ var updater = new GitHubUpdater("you", "myapp", new UpdaterOptions
     ReleaseFilter = r => !r.IsPrerelease,
 });
 
-var check = await updater.CheckAsync();
-if (check.UpdateAvailable)
-    Console.WriteLine($"New version {check.Latest!.Version} available.");
+var release = await updater.FetchAsync();
+if (release is not null)
+{
+    Console.WriteLine($"New version {release.Version} available.");
+    await updater.ApplyAsync(release); // download, verify, stage, hand off
+}
 ```
 
-That's the whole surface: `CheckAsync()` to peek, `UpdateAsync()` to do it.
+The surface is three methods: `FetchAsync()` resolves the release to move to,
+`ApplyAsync(release)` downloads and stages it, and `UpdateAsync()` is shorthand for
+fetch-then-apply (so it never lists the source twice).
 
 ### The handoff command
 

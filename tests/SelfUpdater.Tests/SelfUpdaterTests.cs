@@ -219,26 +219,26 @@ public class SelfUpdaterTests
     [Fact]
     public async Task Updater_DetectsAvailableAndUpToDate()
     {
-        var available = await new FakeUpdater(Options("1.0.0"), RawAsset("9.9.9")).CheckAsync();
-        Assert.True(available.UpdateAvailable);
-        Assert.Equal(V("9.9.9"), available.Latest!.Version);
+        var available = await new FakeUpdater(Options("1.0.0"), RawAsset("9.9.9")).FetchAsync();
+        Assert.NotNull(available);
+        Assert.Equal(V("9.9.9"), available.Version);
 
-        var upToDate = await new FakeUpdater(Options("1.0.0"), RawAsset("1.0.0")).CheckAsync();
-        Assert.False(upToDate.UpdateAvailable);
+        var upToDate = await new FakeUpdater(Options("1.0.0"), RawAsset("1.0.0")).FetchAsync();
+        Assert.Null(upToDate);
     }
 
     [Fact]
     public async Task Updater_PicksNewestAcrossMultipleReleases()
     {
-        var check = await new FakeUpdater(
+        var fetched = await new FakeUpdater(
             Options("1.5.0"),
             RawAsset("1.0.0"),
             RawAsset("3.0.0"),
             RawAsset("2.0.0")
-        ).CheckAsync();
+        ).FetchAsync();
 
-        Assert.True(check.UpdateAvailable);
-        Assert.Equal(V("3.0.0"), check.Latest!.Version);
+        Assert.NotNull(fetched);
+        Assert.Equal(V("3.0.0"), fetched.Version);
     }
 
     [Fact]
@@ -247,25 +247,25 @@ public class SelfUpdaterTests
         var assets = new[] { RawAsset("2.0.0"), RawAsset("3.0.0-rc.1") };
 
         // Without a filter the prerelease is newest; with one it is skipped.
-        var all = await new FakeUpdater(Options("1.0.0"), assets).CheckAsync();
-        Assert.Equal(V("3.0.0-rc.1"), all.Latest!.Version);
+        var all = await new FakeUpdater(Options("1.0.0"), assets).FetchAsync();
+        Assert.Equal(V("3.0.0-rc.1"), all!.Version);
 
         var stableOnly = await new FakeUpdater(
             Options("1.0.0", releaseFilter: r => !r.IsPrerelease),
             assets
-        ).CheckAsync();
-        Assert.Equal(V("2.0.0"), stableOnly.Latest!.Version);
+        ).FetchAsync();
+        Assert.Equal(V("2.0.0"), stableOnly!.Version);
     }
 
     [Fact]
-    public async Task Updater_ReportsNoAssetForPlatform()
+    public async Task Updater_NoUpdateWhenNoAssetForPlatform()
     {
-        // A newer build exists, but only for another platform.
-        var result = await new FakeUpdater(
-            Options("1.0.0", allowNonSingleFile: true),
+        // A newer build exists, but only for another platform: nothing to fetch.
+        var fetched = await new FakeUpdater(
+            Options("1.0.0"),
             RawAsset("2.0.0", rid: "win-x64")
-        ).UpdateAsync();
-        Assert.Equal(UpdateOutcome.NoAssetForPlatform, result.Outcome);
+        ).FetchAsync();
+        Assert.Null(fetched);
     }
 
     [Fact]
